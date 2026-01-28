@@ -1,0 +1,145 @@
+步骤 1: 定义映射数据结构
+首先，需要定义用于存储映射关系的数据结构：
+
+c
+// 在 aigtocnf.c 中添加
+typedef struct {
+    unsigned aig_lit;     // AIG literal
+    int cnf_var;          // 对应的 CNF 变量
+    char *name;           // 可选：变量名称
+} aig_cnf_mapping;
+
+// 存储映射关系的数组
+static aig_cnf_mapping *mapping_table = NULL;
+static unsigned mapping_count = 0;
+static unsigned mapping_capacity = 0;
+步骤 2: 修改变量映射创建过程
+在创建 CNF 变量映射时，记录 AIG 变量到 CNF 变量的映射关系：
+
+c
+// 在创建 map 的过程中添加映射记录
+for (lit = 2; lit <= 2 * aiger->maxvar; lit += 2) {
+    unsigned not_lit = lit + 1;
+    if (!refs[lit] && !refs[not_lit])
+        continue;
+    
+    // 创建映射关系
+    map[lit] = ++m;
+    map[not_lit] = -m;
+    
+    // 记录映射关系
+    record_mapping(lit, m, aiger);
+    
+    if (prtmap)
+        fprintf(file, "c %d -> %d\n", lit, m);
+    // ... 其他代码
+}
+步骤 3: 实现映射记录函数
+添加记录映射关系的辅助函数：
+
+c
+static void record_mapping(unsigned aig_lit, int cnf_var, aiger *aiger) {
+    // 扩展映射表容量（如果需要）
+    if (mapping_count >= mapping_capacity) {
+        mapping_capacity = mapping_capacity ? mapping_capacity * 2 : 16;
+        mapping_table = realloc(mapping_table, 
+                              mapping_capacity * sizeof(aig_cnf_mapping));
+    }
+    
+    // 记录映射
+    mapping_table[mapping_count].aig_lit = aig_lit;
+    mapping_table[mapping_count].cnf_var = cnf_var;
+    
+    // 尝试获取变量名称
+    const char *name = aiger_get_symbol(aiger, aig_lit);
+    if (name) {
+        mapping_table[mapping_count].name = strdup(name);
+    } else {
+        mapping_table[mapping_count].name = NULL;
+    }
+    
+    mapping_count++;
+}
+步骤 4: 添加映射输出选项
+在命令行选项中添加输出映射的选项：
+
+c
+// 添加全局变量
+static int output_mapping = 0;
+
+// 在参数解析部分添加
+else if (!strcmp(argv[i], "--map"))
+    output_mapping = 1;
+
+// 在输出部分添加映射输出
+if (output_mapping) {
+    fprintf(file, "c --- Variable Mapping ---\n");
+    for (unsigned i = 0; i < mapping_count; i++) {
+        if (mapping_table[i].name) {
+            fprintf(file, "c AIG %u (%s) -> CNF %d\n", 
+                   mapping_table[i].aig_lit, 
+                   mapping_table[i].name,
+                   abs(mapping_table[i].cnf_var));
+        } else {
+            fprintf(file, "c AIG %u -> CNF %d\n", 
+                   mapping_table[i].aig_lit, 
+                   abs(mapping_table[i].cnf_var));
+        }
+    }
+    fprintf(file, "c --- End Mapping ---\n");
+}
+步骤 5: 实现映射文件输出
+还可以添加将映射关系输出到单独文件的功能：
+
+c
+static void output_mapping_file(const char *mapping_filename) {
+    if (!mapping_filename) return;
+    
+    FILE *map_file = fopen(mapping_filename, "w");
+    if (!map_file) return;
+    
+    fprintf(map_file, "# AIG to CNF Variable Mapping\n");
+    fprintf(map_file, "# Format: AIG_literal CNF_variable [optional_name]\n");
+    
+    for (unsigned i = 0; i < mapping_count; i++) {
+        if (mapping_table[i].name) {
+            fprintf(map_file, "%u %d %s\n", 
+                   mapping_table[i].aig_lit,
+                   abs(mapping_table[i].cnf_var),
+                   mapping_table[i].name);
+        } else {
+            fprintf(map_file, "%u %d\n", 
+                   mapping_table[i].aig_lit,
+                   abs(mapping_table[i].cnf_var));
+        }
+    }
+    
+    fclose(map_file);
+}
+步骤 6: 内存管理和清理
+在程序结束前清理映射表：
+
+c
+// 在程序结束前添加清理代码
+static void cleanup_mapping() {
+    if (mapping_table) {
+        for (unsigned i = 0; i < mapping_count; i++) {
+            if (mapping_table[i].name) {
+                free(mapping_table[i].name);
+            }
+        }
+        free(mapping_table);
+        mapping_table = NULL;
+        mapping_count = 0;
+        mapping_capacity = 0;
+    }
+}
+步骤 7: 更新命令行接口
+修改使用说明以包含新功能：
+
+c
+// 更新 USAGE 信息
+fprintf(stderr,
+    "usage: aigtocnf [-h][-v][--map][--map-file <file>][--no-coi][--no-pg][--no-xor][--no-ite] "
+    "[ <aig-file> [ <dimacs-file> ] ]\n");
+这样，整个实现流程就包括了：定义映射结构 → 记录映射关系 → 提供输出选项 → 管理内存，从而实现了 AIGER 到 CNF 转换过程中节点映射关系的传递功能。
