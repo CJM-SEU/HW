@@ -1,0 +1,22 @@
+echo "=== include dir ==="
+ls -lah /usr/include/python2.7
+
+echo "=== search Python.h ==="
+find /usr/include -name Python.h 2>/dev/null
+find /usr -name Python.h 2>/dev/null | head -20
+
+echo "=== search python headers ==="
+find /usr/include/python2.7 -maxdepth 1 -name "*.h" -print
+
+echo "=== python library ==="
+ls -l /usr/lib64/libpython2.7*
+
+echo "=== python executable ==="
+which python2.7
+python2.7 -V
+
+echo "=== python sysconfig ==="
+python2.7 -c "import distutils.sysconfig as s; print(s.get_python_inc())"
+python2.7 -c "import distutils.sysconfig as s; print(s.get_config_var('INCLUDEPY'))"
+python2.7 -c "import distutils.sysconfig as s; print(s.get_config_var('LIBDIR'))"
+python2.7 -c "import distutils.sysconfig as s; print(s.get_config_var('LDLIBRARY'))"
