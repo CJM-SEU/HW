@@ -1,13 +1,7 @@
 python3 - <<'PY'
-import sys
-print("python executable:", sys.executable)
-
-import semver
-print("semver repr:", semver)
-print("semver origin:", getattr(semver.__spec__, "origin", None))
-print("semver file:", getattr(semver, "__file__", "NO __file__"))
-print("has SemVer:", hasattr(semver, "SemVer"))
-
 from semver import SemVer
-print("SemVer import OK:", SemVer)
+print("SemVer OK:", SemVer)
+
+from past.builtins import xrange
+print("past.builtins xrange OK:", xrange)
 PY
