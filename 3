@@ -10,3 +10,13 @@ print("semver path:", getattr(semver, "__path__", None))
 print("has SemVer:", hasattr(semver, "SemVer"))
 print("dir head:", dir(semver)[:30])
 PY
+
+
+ls -la ~/.local/lib/python3.6/site-packages | grep -i semver
+find ~/.local/lib/python3.6/site-packages -maxdepth 2 -iname '*semver*' -print
+
+rm -rf ~/.local/lib/python3.6/site-packages/semver.py
+rm -rf ~/.local/lib/python3.6/site-packages/semver
+rm -rf ~/.local/lib/python3.6/site-packages/semver-*.dist-info
+rm -rf ~/.local/lib/python3.6/site-packages/node_semver-*.dist-info
+rm -rf ~/.local/lib/python3.6/site-packages/__pycache__/semver*.pyc
