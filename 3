@@ -1,44 +1,12 @@
-which python
-which python3
-which pip
-which conan || true
-
-python3 -V
-python3 -m pip -V
-python3 -m pip show conan semver node-semver semantic-version || true
-
-
-python3 - <<'PY'
-import sys
-print("Python executable:", sys.executable)
-
-try:
-    import semver
-    print("semver module file:", semver.__file__)
-    print("semver version:", getattr(semver, "__version__", "NO __version__"))
-    print("has SemVer:", hasattr(semver, "SemVer"))
-    print("has Version:", hasattr(semver, "Version"))
-except Exception as e:
-    print("import semver failed:", repr(e))
-
-try:
-    from semver import SemVer
-    print("from semver import SemVer: OK")
-except Exception as e:
-    print("from semver import SemVer: FAILED:", repr(e))
-PY
-
-
-
-
 python3 - <<'PY'
 import sys
 print("python executable:", sys.executable)
 
 import semver
-print("semver module file:", semver.__file__)
+print("semver repr:", semver)
+print("semver spec:", semver.__spec__)
+print("semver origin:", getattr(semver.__spec__, "origin", None))
+print("semver path:", getattr(semver, "__path__", None))
 print("has SemVer:", hasattr(semver, "SemVer"))
-
-from semver import SemVer
-print("SemVer import OK:", SemVer)
+print("dir head:", dir(semver)[:30])
 PY
