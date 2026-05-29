@@ -27,3 +27,18 @@ try:
 except Exception as e:
     print("from semver import SemVer: FAILED:", repr(e))
 PY
+
+
+
+
+python3 - <<'PY'
+import sys
+print("python executable:", sys.executable)
+
+import semver
+print("semver module file:", semver.__file__)
+print("has SemVer:", hasattr(semver, "SemVer"))
+
+from semver import SemVer
+print("SemVer import OK:", SemVer)
+PY
