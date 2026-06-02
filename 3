@@ -1,6 +1,55 @@
-/usr/bin/python -V
-/usr/bin/python - <<'PY'
-import sys
-print(sys.executable)
-print(sys.version)
-PY
+#include <iostream>
+#include <fstream>
+#include <string>
+
+/**
+ * Extract from a log file: start at the first line containing "property_result",
+ * print until (and including) the next line containing "depth=0" (marking the
+ * end of the property-result record), then return.
+ *
+ * Returns true on success, false if no property_result line was found.
+ */
+bool print_property_result(const char* filepath)
+{
+    std::ifstream fin(filepath);
+    if (!fin.is_open()) {
+        std::cerr << "Error: cannot open file \"" << filepath << "\"" << std::endl;
+        return false;
+    }
+
+    bool found = false;
+    std::string line;
+
+    while (std::getline(fin, line))
+    {
+        if (!found) {
+            // scan for the property_result marker
+            if (line.find("property_result") != std::string::npos) {
+                found = true;
+                std::cout << line << std::endl;
+            }
+        } else {
+            // keep printing until we hit depth=0
+            std::cout << line << std::endl;
+
+            if (line.find("depth=0") != std::string::npos)
+                break;
+        }
+    }
+
+    fin.close();
+
+    if (!found) {
+        std::cerr << "Info: no \"property_result\" line found in \"" << filepath << "\"" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+int main(int argc, char* argv[])
+{
+    const char* path = (argc >= 2) ? argv[1] : "test/deep.log";
+    bool ok = print_property_result(path);
+    return ok ? 0 : 1;
+}
