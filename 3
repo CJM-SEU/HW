@@ -3,13 +3,18 @@
 #include <string>
 
 /**
- * Extract from a log file: start at the first line containing "property_result",
- * print until (and including) the next line containing "depth=0" (marking the
- * end of the property-result record), then return.
+ * Locate the first line containing "property_result" in the log file.
+ * Strip the leading number (e.g. "1 "), print only up to the comma
+ * before "cex", and return immediately.
+ *
+ * Example input line:
+ *   1 property_result(engine='bmc3', prop_no=0, result='failed', depth=0, cex=[...])
+ * Output:
+ *   property_result(engine='bmc3', prop_no=0, result='failed', depth=0
  *
  * Returns true on success, false if no property_result line was found.
  */
-bool print_property_result(const char* filepath)
+bool print_property_result(const std::string& filepath)
 {
     std::ifstream fin(filepath);
     if (!fin.is_open()) {
@@ -17,34 +22,30 @@ bool print_property_result(const char* filepath)
         return false;
     }
 
-    bool found = false;
     std::string line;
-
     while (std::getline(fin, line))
     {
-        if (!found) {
-            // scan for the property_result marker
-            if (line.find("property_result") != std::string::npos) {
-                found = true;
-                std::cout << line << std::endl;
-            }
-        } else {
-            // keep printing until we hit depth=0
-            std::cout << line << std::endl;
+        // locate the property_result marker
+        size_t pos = line.find("property_result");
+        if (pos == std::string::npos)
+            continue;
 
-            if (line.find("depth=0") != std::string::npos)
-                break;
-        }
+        // strip the leading number (e.g. "1 ")
+        std::string content = line.substr(pos);
+
+        // cut off at ", cex" so cex data is not printed
+        size_t cex_pos = content.find(", cex");
+        if (cex_pos != std::string::npos)
+            content = content.substr(0, cex_pos);
+
+        std::cout << content << std::endl;
+        fin.close();
+        return true;
     }
 
     fin.close();
-
-    if (!found) {
-        std::cerr << "Info: no \"property_result\" line found in \"" << filepath << "\"" << std::endl;
-        return false;
-    }
-
-    return true;
+    std::cerr << "Info: no \"property_result\" line found in \"" << filepath << "\"" << std::endl;
+    return false;
 }
 
 int main(int argc, char* argv[])
