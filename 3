@@ -48,9 +48,39 @@ bool print_property_result(const std::string& filepath)
     return false;
 }
 
-int main(int argc, char* argv[])
+
+
+
 {
-    const char* path = (argc >= 2) ? argv[1] : "test/deep.log";
-    bool ok = print_property_result(path);
-    return ok ? 0 : 1;
+    std::ifstream fin(filepath);
+    if (!fin.is_open()) {
+        std::cerr << "Error: cannot open file \"" << filepath << "\"" << std::endl;
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(fin, line))
+    {
+        // try property_result
+        size_t pos = line.find("property_result");
+        if (pos != std::string::npos) {
+            std::cout << strip_and_cut(line, pos) << std::endl;
+            fin.close();
+            return true;
+        }
+
+        // try json_result
+        pos = line.find("json_result");
+        if (pos != std::string::npos) {
+            std::cout << strip_and_cut(line, pos) << std::endl;
+            fin.close();
+            return true;
+        }
+    }
+
+    fin.close();
+    std::cerr << "Info: no \"property_result\" or \"json_result\" line found in \""
+              << filepath << "\"" << std::endl;
+    return false;
 }
+
