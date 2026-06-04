@@ -1,0 +1,86 @@
+std::optional<size_t> countULines(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "错误: 无法打开文件 " << filename << std::endl;
+        return std::nullopt;
+    }
+
+    std::string line;
+    size_t u_count = 0;
+
+    // ── 状态机 ──
+    enum State {
+        READING_U,     // 正在读取 u 开头的行（第一阶段）
+        EXPECT_1,      // u 行结束，期待下一行是 "1"
+        EXPECT_B0,     // 已读到 "1"，期待下一行是 "b0"
+        DONE           // 校验通过，后续行不再检查
+    };
+    State state = READING_U;
+
+    // ── 逐行处理 ──
+    while (std::getline(file, line)) {
+        switch (state) {
+            case READING_U: {
+                // 去掉可能的 \r (Windows 换行)
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+
+                if (line.empty() || line[0] != 'u') {
+                    // u 序列结束，这一行必须是 "1"
+                    if (u_count == 0) {
+                        // 第一行就不是 u → 直接失败
+                        std::cerr << "错误: 第一行不是 u 开头" << std::endl;
+                        return std::nullopt;
+                    }
+                    if (line != "1") {
+                        std::cerr << "错误: u 行之后的第一行必须是 \"1\"，实际为 \""
+                                  << line << "\"" << std::endl;
+                        return std::nullopt;
+                    }
+                    state = EXPECT_B0;
+                } else {
+                    u_count++;
+                }
+                break;
+            }
+
+            case EXPECT_B0: {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+
+                if (line != "b0") {
+                    std::cerr << "错误: \"1\" 之后必须是 \"b0\"，实际为 \""
+                              << line << "\"" << std::endl;
+                    return std::nullopt;
+                }
+                state = DONE;
+                break;
+            }
+
+            case DONE: {
+                // 后续行随意，不做检查
+                break;
+            }
+
+            // EXPECT_1 不会出现在循环中（在 READING_U 分支中直接处理了 "1"）
+            default:
+                break;
+        }
+    }
+
+    // ── 文件结束后的校验 ──
+    if (u_count == 0) {
+        std::cerr << "错误: 文件为空或第一行不是 u 开头" << std::endl;
+        return std::nullopt;
+    }
+    if (state == READING_U) {
+        // 文件只有 u 行，缺少 "1" 和 "b0"
+        std::cerr << "错误: u 行之后缺少 \"1\" 和 \"b0\"" << std::endl;
+        return std::nullopt;
+    }
+    if (state == EXPECT_B0) {
+        // 读到了 "1" 但文件结束，缺少 "b0"
+        std::cerr << "错误: \"1\" 之后缺少 \"b0\"" << std::endl;
+        return std::nullopt;
+    }
+
+    return u_count;
+}
