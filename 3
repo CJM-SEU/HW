@@ -1,29 +1,99 @@
-现在重新配置并编译 Bitwuzla。之前的构建目录缓存了 GMP 缺失状态，必须删除。
+这个报错已经定位：之前 GMP 只构建了 C 接口，Bitwuzla 还需要 GMP 的 C++ 接口 gmpxx.h。这与 Boost 无关。需要用官方干净源码重新
+  配置 GMP，增加 --enable-cxx，从而安装 gmpxx.h 和 libgmpxx，之后清空 Bitwuzla 缓存再配置。
 
-  ## 1. 设置环境
+• 重新构建 GMP 时增加 --enable-cxx。
+
+  ## 1. 重新配置 GMP
+
+  继续使用官方干净源码包：
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
-  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
-  export MESON_SRC=$ROOT/packages/meson-0.64.1
   export JOBS=$(nproc)
 
-  export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$ROOT/.local-centos7/libffi/lib:$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+  rm -rf /tmp/cwx-gmp-cxx-src
+  rm -rf /tmp/cwx-gmp-cxx-build
 
-  确认工具和 GMP：
+  mkdir -p /tmp/cwx-gmp-cxx-src
+  mkdir -p /tmp/cwx-gmp-cxx-build
 
-  "$PYTHON38" "$MESON_SRC/meson.py" --version
-  ninja --version
-  pkg-config --modversion gmp
-  /tmp/test-gmp
+  tar -xJf "$ROOT/packages/gmp-6.3.0.tar.xz" \
+    -C /tmp/cwx-gmp-cxx-src \
+    --strip-components=1
 
-  如果 pkg-config --modversion gmp 输出 6.3.0，继续。
+  配置 C 和 C++ 接口：
 
-  如果 pkg-config 找不到 GMP，创建配置文件：
+  cd /tmp/cwx-gmp-cxx-build
+
+  CC=gcc \
+  CXX=g++ \
+  CFLAGS="-O2 -fPIC" \
+  CXXFLAGS="-O2 -fPIC" \
+  /tmp/cwx-gmp-cxx-src/configure \
+    --prefix="$PREFIX" \
+    --enable-cxx \
+    --enable-static \
+    --enable-shared \
+    --with-pic \
+    --disable-assembly
+
+  编译、测试并覆盖安装：
+
+  make -j"$JOBS"
+  make check
+  make install
+
+  ## 2. 验证 GMP C++ 接口
+
+  ls -l "$PREFIX/include/gmp.h"
+  ls -l "$PREFIX/include/gmpxx.h"
+
+  find "$PREFIX" \
+    \( -name 'libgmp.a' -o \
+       -name 'libgmpxx.a' -o \
+       -name 'libgmp.so*' -o \
+       -name 'libgmpxx.so*' \) \
+    -print
+
+  必须同时找到：
+
+  .local-centos7/include/gmp.h
+  .local-centos7/include/gmpxx.h
+  .local-centos7/lib/libgmp.a
+  .local-centos7/lib/libgmpxx.a
+
+  测试 C++ 接口：
+
+  cat >/tmp/test-gmpxx.cpp <<'EOF'
+  #include <gmpxx.h>
+  #include <iostream>
+
+  int main()
+  {
+      mpz_class a = 123;
+      mpz_class b = 456;
+      std::cout << a * b << std::endl;
+      return 0;
+  }
+  EOF
+
+  g++ /tmp/test-gmpxx.cpp \
+    -I"$PREFIX/include" \
+    -L"$PREFIX/lib" \
+    -Wl,-rpath,"$PREFIX/lib" \
+    -lgmpxx \
+    -lgmp \
+    -o /tmp/test-gmpxx
+
+  /tmp/test-gmpxx
+
+  预期输出：
+
+  56088
+
+  ## 3. 更新 gmp.pc
+
+  Bitwuzla 使用了 gmpxx.h，建议把 libgmpxx 加入配置：
 
   mkdir -p "$PREFIX/lib/pkgconfig"
 
@@ -33,28 +103,33 @@
   libdir=\${prefix}/lib
   includedir=\${prefix}/include
 
-  Name: GNU MP
-  Description: GNU Multiple Precision Arithmetic Library
+  Name: GNU MP C++
+  Description: GNU Multiple Precision Arithmetic Library with C++ interface
   Version: 6.3.0
-  Libs: -L\${libdir} -lgmp
+  Libs: -L\${libdir} -lgmpxx -lgmp
   Cflags: -I\${includedir}
   EOF
 
-  然后：
+  验证：
 
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
-  pkg-config --modversion gmp
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
 
-  ## 2. 删除旧 Bitwuzla 构建缓存
+  pkg-config --cflags gmp
+  pkg-config --libs gmp
+
+  预期类似：
+
+  -I.../.local-centos7/include
+  -L.../.local-centos7/lib -lgmpxx -lgmp
+
+  ## 4. 清空 Bitwuzla 旧缓存
+
+  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
+  export MESON_SRC=$ROOT/packages/meson-0.64.1
 
   rm -rf "$ROOT/host-build/bitwuzla"
-  mkdir -p "$ROOT/host-build"
 
-  不要删除源码目录：
-
-  deps/smt-switch/deps/bitwuzla
-
-  ## 3. 配置 Bitwuzla
+  重新配置：
 
   "$PYTHON38" "$MESON_SRC/meson.py" setup \
     "$ROOT/host-build/bitwuzla" \
@@ -67,70 +142,22 @@
     -Dpython=false \
     -Ddocs=false
 
-  确认输出中包含：
+  确认 Meson 使用正确头文件：
 
-  Run-time dependency gmp found: YES 6.3.0
+  grep -R "$PREFIX/include" \
+    "$ROOT/host-build/bitwuzla/meson-logs" \
+    | head
 
-  如果出现下面内容，先停止：
-
-  Downloading...
-  Could not resolve host...
-  Subproject ... is buildable: NO
-
-  这代表缺少某个离线子依赖。
-
-  ## 4. 编译 Bitwuzla
-
-  先单线程编译，方便识别真实错误：
+  然后单线程编译：
 
   "$PYTHON38" "$MESON_SRC/meson.py" compile \
     -C "$ROOT/host-build/bitwuzla" \
     -j 1
 
-  成功后安装：
+  成功后：
 
   "$PYTHON38" "$MESON_SRC/meson.py" install \
     -C "$ROOT/host-build/bitwuzla"
 
-  ## 5. 验证安装结果
-
-  find "$PREFIX" \
-    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
-    -print
-
-  检查主库：
-
-  BITWUZLA_LIB=$(find "$PREFIX" -name libbitwuzla.a | head -1)
-
-  echo "$BITWUZLA_LIB"
-  file "$BITWUZLA_LIB"
-  ar t "$BITWUZLA_LIB" | head
-
-  检查 pkg-config：
-
-  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
-
-  echo "$BITWUZLA_PC"
-  grep -nE '^(prefix|libdir|includedir)' "$BITWUZLA_PC"
-
-  prefix 应当是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7
-
-  不能包含旧路径：
-
-  grep -R '/home/jiongming' \
-    "$PREFIX/lib" \
-    "$PREFIX/lib64" \
-    2>/dev/null
-
-  ## 6. 激活 Bitwuzla 的 pkg-config
-
-  export PKG_CONFIG_PATH="$(dirname "$BITWUZLA_PC"):$PKG_CONFIG_PATH"
-
-  pkg-config --modversion bitwuzla
-  pkg-config --cflags bitwuzla
-  pkg-config --libs bitwuzla
-
-  Bitwuzla 成功后，下一步是解决 Boost，然后构建 smt-switch。如果本次失败，只需告诉我第一条 ERROR: 的内容或缺失的 subproject 名
-  称。
+  至于配置时显示的“部分子模块找不到”，需要区分可选和必需依赖。只要 meson setup 最终成功生成 build 目录，缺少的可能是测试、文档
+  或可选求解器模块。如果下一次仍失败，请告诉我缺失模块的具体名称。
