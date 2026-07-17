@@ -1,135 +1,59 @@
-这个报错已经定位：之前 GMP 只构建了 C 接口，Bitwuzla 还需要 GMP 的 C++ 接口 gmpxx.h。这与 Boost 无关。需要用官方干净源码重新
-  配置 GMP，增加 --enable-cxx，从而安装 gmpxx.h 和 libgmpxx，之后清空 Bitwuzla 缓存再配置。
+这是 CentOS 7 缺少系统静态 glibc 库导致的，并不是 GMP 或 Bitwuzla 源码错误。
 
-• 重新构建 GMP 时增加 --enable-cxx。
+  Bitwuzla 在 --default-library=static 模式下，会给最终命令行程序添加：
 
-  ## 1. 重新配置 GMP
+  -static
 
-  继续使用官方干净源码包：
+  于是链接器要求系统提供静态版本的：
+
+  - libm.a
+  - libpthread.a
+  - librt.a（你看到的最后一个可能是 -lrt）
+
+  这些通常由 glibc-static 提供，但你没有 sudo，无法安装系统包。
+
+  FORWORD 只要求 Bitwuzla 静态库，不要求 bitwuzla 命令行程序自身完全静态。因此，应保留 libbitwuzla.a，但取消命令行程序的
+  -static。
+
+  ## 1. 修改 Bitwuzla 的命令行程序配置
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+
+  cd "$ROOT/deps/smt-switch/deps/bitwuzla/src/main"
+
+  cp meson.build meson.build.before-centos7
+
+  把添加 -static 的行注释掉：
+
+  sed -i \
+    "s/^[[:space:]]*link_args += \\['-static'\\]/  # Disabled: CentOS host has no glibc-static/" \
+    meson.build
+
+  检查结果：
+
+  grep -n -A3 -B3 'glibc-static\|-static' meson.build
+
+  应看到类似：
+
+  if build_static and host_machine.system() != 'darwin'
+    # Disabled: CentOS host has no glibc-static
+  endif
+
+  ## 2. 重新配置
+
+  为了避免旧链接参数继续留在 Ninja 文件中，清空构建目录：
+
   export PREFIX=$ROOT/.local-centos7
-  export JOBS=$(nproc)
-
-  rm -rf /tmp/cwx-gmp-cxx-src
-  rm -rf /tmp/cwx-gmp-cxx-build
-
-  mkdir -p /tmp/cwx-gmp-cxx-src
-  mkdir -p /tmp/cwx-gmp-cxx-build
-
-  tar -xJf "$ROOT/packages/gmp-6.3.0.tar.xz" \
-    -C /tmp/cwx-gmp-cxx-src \
-    --strip-components=1
-
-  配置 C 和 C++ 接口：
-
-  cd /tmp/cwx-gmp-cxx-build
-
-  CC=gcc \
-  CXX=g++ \
-  CFLAGS="-O2 -fPIC" \
-  CXXFLAGS="-O2 -fPIC" \
-  /tmp/cwx-gmp-cxx-src/configure \
-    --prefix="$PREFIX" \
-    --enable-cxx \
-    --enable-static \
-    --enable-shared \
-    --with-pic \
-    --disable-assembly
-
-  编译、测试并覆盖安装：
-
-  make -j"$JOBS"
-  make check
-  make install
-
-  ## 2. 验证 GMP C++ 接口
-
-  ls -l "$PREFIX/include/gmp.h"
-  ls -l "$PREFIX/include/gmpxx.h"
-
-  find "$PREFIX" \
-    \( -name 'libgmp.a' -o \
-       -name 'libgmpxx.a' -o \
-       -name 'libgmp.so*' -o \
-       -name 'libgmpxx.so*' \) \
-    -print
-
-  必须同时找到：
-
-  .local-centos7/include/gmp.h
-  .local-centos7/include/gmpxx.h
-  .local-centos7/lib/libgmp.a
-  .local-centos7/lib/libgmpxx.a
-
-  测试 C++ 接口：
-
-  cat >/tmp/test-gmpxx.cpp <<'EOF'
-  #include <gmpxx.h>
-  #include <iostream>
-
-  int main()
-  {
-      mpz_class a = 123;
-      mpz_class b = 456;
-      std::cout << a * b << std::endl;
-      return 0;
-  }
-  EOF
-
-  g++ /tmp/test-gmpxx.cpp \
-    -I"$PREFIX/include" \
-    -L"$PREFIX/lib" \
-    -Wl,-rpath,"$PREFIX/lib" \
-    -lgmpxx \
-    -lgmp \
-    -o /tmp/test-gmpxx
-
-  /tmp/test-gmpxx
-
-  预期输出：
-
-  56088
-
-  ## 3. 更新 gmp.pc
-
-  Bitwuzla 使用了 gmpxx.h，建议把 libgmpxx 加入配置：
-
-  mkdir -p "$PREFIX/lib/pkgconfig"
-
-  cat > "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
-  prefix=$PREFIX
-  exec_prefix=\${prefix}
-  libdir=\${prefix}/lib
-  includedir=\${prefix}/include
-
-  Name: GNU MP C++
-  Description: GNU Multiple Precision Arithmetic Library with C++ interface
-  Version: 6.3.0
-  Libs: -L\${libdir} -lgmpxx -lgmp
-  Cflags: -I\${includedir}
-  EOF
-
-  验证：
-
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig"
-
-  pkg-config --cflags gmp
-  pkg-config --libs gmp
-
-  预期类似：
-
-  -I.../.local-centos7/include
-  -L.../.local-centos7/lib -lgmpxx -lgmp
-
-  ## 4. 清空 Bitwuzla 旧缓存
-
   export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
   export MESON_SRC=$ROOT/packages/meson-0.64.1
 
+  export PATH="$PREFIX/bin:$PATH"
+  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+
   rm -rf "$ROOT/host-build/bitwuzla"
 
-  重新配置：
+  重新配置，仍保留静态库模式：
 
   "$PYTHON38" "$MESON_SRC/meson.py" setup \
     "$ROOT/host-build/bitwuzla" \
@@ -142,22 +66,31 @@
     -Dpython=false \
     -Ddocs=false
 
-  确认 Meson 使用正确头文件：
-
-  grep -R "$PREFIX/include" \
-    "$ROOT/host-build/bitwuzla/meson-logs" \
-    | head
-
-  然后单线程编译：
+  ## 3. 重新编译
 
   "$PYTHON38" "$MESON_SRC/meson.py" compile \
     -C "$ROOT/host-build/bitwuzla" \
     -j 1
 
-  成功后：
+  现在最终链接命令中不应再出现独立的：
+
+  -static
+
+  -lm、-lpthread 和 -lrt 会改为链接系统动态库。
+
+  ## 4. 安装
 
   "$PYTHON38" "$MESON_SRC/meson.py" install \
     -C "$ROOT/host-build/bitwuzla"
 
-  至于配置时显示的“部分子模块找不到”，需要区分可选和必需依赖。只要 meson setup 最终成功生成 build 目录，缺少的可能是测试、文档
-  或可选求解器模块。如果下一次仍失败，请告诉我缺失模块的具体名称。
+  验证静态库：
+
+  find "$PREFIX" -name 'libbitwuzla*.a' -print
+  find "$PREFIX" -name 'bitwuzla.pc' -print
+
+  验证命令行程序：
+
+  "$PREFIX/bin/bitwuzla" --version
+  ldd "$PREFIX/bin/bitwuzla"
+
+  ldd 显示动态依赖是正常的。我们需要的是 Bitwuzla 库保持静态，并不要求它的命令行程序完全静态。
