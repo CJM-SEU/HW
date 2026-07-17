@@ -1,159 +1,165 @@
-如果 Bitwuzla 和 Boost 都已通过验证，下一步重新编译 glog 和 btor2tools。不要使用仓库里从原机器复制的静态库。
+下一步构建 smt-switch。FORWORD 同时要求：
 
-  先确认前置依赖：
+  - libsmt-switch.a
+  - libsmt-switch-bitwuzla.a
+  - libsmt-switch-cvc5.a
+
+  因此需要启用 Bitwuzla、cvc5 和 SMT-LIB reader。
+
+  ## 1. 设置环境
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
+  export SMT_SRC=$ROOT/deps/smt-switch
+  export SMT_INSTALL=$SMT_SRC/local-centos7
+  export SMT_BUILD=$ROOT/host-build/smt-switch
   export JOBS=$(nproc)
 
   export PATH="$PREFIX/bin:$PATH"
   export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
+  export CPATH="$PREFIX/include:${CPATH:-}"
   export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:$PREFIX/lib/x86_64-linux-gnu/pkgconfig:
   ${PKG_CONFIG_PATH:-}"
+  export CMAKE_PREFIX_PATH="$PREFIX"
 
-  find "$PREFIX" \
-    \( -name 'libbitwuzla.a' -o \
-       -name 'libboost_system.a' -o \
-       -name 'libboost_filesystem.a' -o \
-       -name 'libgflags.a' \) \
-    -print
+  ## 2. 检查依赖
 
-  如果四个库都能找到，继续。
+  bison --version | head -1
+  flex --version
+  pkg-config --modversion gmp
+  pkg-config --modversion bitwuzla
 
-  ## 1. 原生构建 glog
-
-  建立全新构建目录：
-
-  rm -rf "$ROOT/host-build/glog"
-  rm -rf "$ROOT/deps/glog/install-centos7"
-
-  配置：
-
-  cmake \
-    -S "$ROOT/deps/glog" \
-    -B "$ROOT/host-build/glog" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$ROOT/deps/glog/install-centos7" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DWITH_GFLAGS=OFF \
-    -DBUILD_TESTING=OFF \
-    -DWITH_GTEST=OFF \
-    -DWITH_UNWIND=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
-  编译并安装：
-
-  cmake --build "$ROOT/host-build/glog" -j1
-  cmake --install "$ROOT/host-build/glog"
-
-  验证：
-
-  find "$ROOT/deps/glog/install-centos7" \
-    \( -name 'libglog.a' -o -name 'logging.h' \) \
-    -print
-
-  ## 2. 让 FORWORD 使用新 glog
-
-  FORWORD 顶层 CMake 固定寻找：
-
-  deps/glog/install/lib/libglog.a
-
-  备份原机器结果：
-
-  cd "$ROOT/deps/glog"
-
-  if [ -d install ] && [ ! -d install-original ]; then
-      mv install install-original
-  fi
-
-  mv install-centos7 install
-
-  检查：
-
-  find "$ROOT/deps/glog/install" \
-    \( -name 'libglog.a' -o -name 'logging.h' \) \
-    -print
-
-  如果库安装在 lib64：
-
-  mkdir -p "$ROOT/deps/glog/install/lib"
-
-  ln -sf ../lib64/libglog.a \
-    "$ROOT/deps/glog/install/lib/libglog.a"
-
-  最终必须存在：
-
-  test -f "$ROOT/deps/glog/install/lib/libglog.a" &&
-  echo "glog ready"
-
-  ## 3. 原生构建 btor2tools
-
-  rm -rf "$ROOT/host-build/btor2tools"
-
-  cmake \
-    -S "$ROOT/deps/btor2tools" \
-    -B "$ROOT/host-build/btor2tools" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
-  编译：
-
-  cmake --build "$ROOT/host-build/btor2tools" -j1
-
-  寻找结果：
-
-  find "$ROOT/host-build/btor2tools" \
-    -name 'libbtor2parser.a' \
-    -print
-
-  ## 4. 替换 btor2tools 旧构建目录
-
-  FORWORD 固定使用：
-
-  deps/btor2tools/build/lib/libbtor2parser.a
-
-  备份原结果：
-
-  cd "$ROOT/deps/btor2tools"
-
-  if [ -d build ] && [ ! -d build-original ]; then
-      mv build build-original
-  fi
-
-  mv "$ROOT/host-build/btor2tools" build
-
-  验证：
-
-  test -f "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a" &&
-  echo "btor2tools ready"
-
-  如果实际库位置不同，查找：
-
-  find "$ROOT/deps/btor2tools/build" -name 'libbtor2parser.a' -print
-
-  若结果不是 build/lib/libbtor2parser.a，建立目标目录和符号链接：
-
-  BTOR2_LIB=$(find "$ROOT/deps/btor2tools/build" -name libbtor2parser.a | head -1)
-
-  mkdir -p "$ROOT/deps/btor2tools/build/lib"
-
-  ln -sf "$BTOR2_LIB" \
-    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
-
-  ## 5. 汇总检查
+  确认 cvc5 文件存在：
 
   ls -lh \
-    "$ROOT/deps/glog/install/lib/libglog.a" \
-    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
+    "$SMT_SRC/deps/cvc5/lib/libcvc5.a" \
+    "$SMT_SRC/deps/cvc5/lib/libcvc5parser.a"
+
+  find "$SMT_SRC/deps/cvc5/lib" -maxdepth 1 -type f \
+    \( -name 'libcadical.a' -o \
+       -name 'libpicpoly.a' -o \
+       -name 'libpicpolyxx.a' \) \
+    -print
+
+  这五个 cvc5 相关静态库都应存在。
+
+  ## 3. 清理新的构建和安装目录
+
+  只删除 CentOS 专用目录，不动仓库原构建结果：
+
+  rm -rf "$SMT_BUILD"
+  rm -rf "$SMT_INSTALL"
+
+  ## 4. 配置 smt-switch
+
+  cd "$SMT_SRC"
+
+  ./configure.sh \
+    --build-dir="$SMT_BUILD" \
+    --prefix="$SMT_INSTALL" \
+    --bitwuzla \
+    --bitwuzla-dir="$PREFIX" \
+    --cvc5 \
+    --cvc5-home="$SMT_SRC/deps/cvc5" \
+    --smtlib-reader \
+    --bison-dir="$PREFIX" \
+    --flex-dir="$PREFIX" \
+    --without-tests \
+    --static \
+    -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DGMP_INCLUDE_DIR="$PREFIX/include" \
+    -DGMP_LIBRARIES="$PREFIX/lib/libgmp.a" \
+    -DGMPXX_LIBRARIES="$PREFIX/lib/libgmpxx.a"
+
+  配置输出中重点确认：
+
+  Found GMP
+  Found BISON
+  Found FLEX
+  Found bitwuzla
+
+  如果配置阶段提示找不到 Bitwuzla，先执行：
+
+  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
+  export PKG_CONFIG_PATH="$(dirname "$BITWUZLA_PC"):$PKG_CONFIG_PATH"
+
+  pkg-config --cflags bitwuzla
+  pkg-config --libs bitwuzla
+
+  然后删除 $SMT_BUILD 并重新配置。
+
+  ## 5. 编译 smt-switch
+
+  先单线程：
+
+  cmake --build "$SMT_BUILD" -j1
+
+  如果成功，安装：
+
+  cmake --install "$SMT_BUILD"
+
+  ## 6. 验证安装结果
+
+  find "$SMT_INSTALL" \
+    \( -name 'libsmt-switch.a' -o \
+       -name 'libsmt-switch-bitwuzla.a' -o \
+       -name 'libsmt-switch-cvc5.a' -o \
+       -name 'smt.h' \) \
+    -print
+
+  必须存在：
+
+  local-centos7/lib/libsmt-switch.a
+  local-centos7/lib/libsmt-switch-bitwuzla.a
+  local-centos7/lib/libsmt-switch-cvc5.a
+  local-centos7/include/smt-switch/smt.h
+
+  检查格式：
 
   file \
-    "$ROOT/deps/glog/install/lib/libglog.a" \
-    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
+    "$SMT_INSTALL/lib/libsmt-switch.a" \
+    "$SMT_INSTALL/lib/libsmt-switch-bitwuzla.a" \
+    "$SMT_INSTALL/lib/libsmt-switch-cvc5.a"
 
-  两者都应显示：
+  均应显示：
 
   current ar archive
 
-  完成这两项后，下一步是原生配置和编译 smt-switch，让它链接刚刚构建的 Bitwuzla、GMP、Bison/Flex，并处理仓库里 cvc5 预编译库的
-  兼容性。
+  ## 7. 让 FORWORD 使用新的 smt-switch
+
+  FORWORD 固定寻找：
+
+  deps/smt-switch/local
+
+  备份原安装目录：
+
+  cd "$SMT_SRC"
+
+  if [ -e local ] && [ ! -e local-original ]; then
+      mv local local-original
+  fi
+
+  创建指向 CentOS 原生安装结果的符号链接：
+
+  ln -s local-centos7 local
+
+  确认：
+
+  ls -ld "$SMT_SRC/local"
+
+  ls -lh \
+    "$SMT_SRC/local/lib/libsmt-switch.a" \
+    "$SMT_SRC/local/lib/libsmt-switch-bitwuzla.a" \
+    "$SMT_SRC/local/lib/libsmt-switch-cvc5.a"
+
+  ## 8. 注意 cvc5 兼容性
+
+  当前 cvc5 是仓库中携带的预编译静态库，不是 CentOS 原生构建。它可能在 smt-switch 编译阶段正常，但在最终链接 FORWORD 时出现：
+
+  GLIBCXX_x.x not found
+  undefined reference
+
+  如果 smt-switch 在 cvc5 部分失败，请保留第一条链接错误。此时需要判断是缺少依赖库，还是 cvc5 与 CentOS ABI 不兼容。
+
+  smt-switch 成功后，下一步就是配置和编译 FORWORD 主项目。
