@@ -1,18 +1,9 @@
-下一步构建 smt-switch。FORWORD 同时要求：
-
-  - libsmt-switch.a
-  - libsmt-switch-bitwuzla.a
-  - libsmt-switch-cvc5.a
-
-  因此需要启用 Bitwuzla、cvc5 和 SMT-LIB reader。
+如果 smt-switch 已成功安装，并且 deps/smt-switch/local 已指向 local-centos7，下一步就是配置和编译 FORWORD 主项目。
 
   ## 1. 设置环境
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
-  export SMT_SRC=$ROOT/deps/smt-switch
-  export SMT_INSTALL=$SMT_SRC/local-centos7
-  export SMT_BUILD=$ROOT/host-build/smt-switch
   export JOBS=$(nproc)
 
   export PATH="$PREFIX/bin:$PATH"
@@ -23,143 +14,142 @@
   ${PKG_CONFIG_PATH:-}"
   export CMAKE_PREFIX_PATH="$PREFIX"
 
-  ## 2. 检查依赖
-
-  bison --version | head -1
-  flex --version
-  pkg-config --modversion gmp
-  pkg-config --modversion bitwuzla
-
-  确认 cvc5 文件存在：
+  ## 2. 汇总检查依赖
 
   ls -lh \
-    "$SMT_SRC/deps/cvc5/lib/libcvc5.a" \
-    "$SMT_SRC/deps/cvc5/lib/libcvc5parser.a"
+    "$PREFIX/lib/libgmp.a" \
+    "$PREFIX/lib/libgmpxx.a" \
+    "$PREFIX/include/gmp.h" \
+    "$PREFIX/include/gmpxx.h" \
+    "$ROOT/deps/glog/install/lib/libglog.a" \
+    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a" \
+    "$ROOT/deps/smt-switch/local/lib/libsmt-switch.a" \
+    "$ROOT/deps/smt-switch/local/lib/libsmt-switch-bitwuzla.a" \
+    "$ROOT/deps/smt-switch/local/lib/libsmt-switch-cvc5.a"
 
-  find "$SMT_SRC/deps/cvc5/lib" -maxdepth 1 -type f \
-    \( -name 'libcadical.a' -o \
-       -name 'libpicpoly.a' -o \
-       -name 'libpicpolyxx.a' \) \
+  检查 Boost 和 gflags：
+
+  find "$PREFIX" \
+    \( -name 'libboost_system.a' -o \
+       -name 'libboost_filesystem.a' -o \
+       -name 'libgflags.a' -o \
+       -name 'gflags-config.cmake' \) \
     -print
 
-  这五个 cvc5 相关静态库都应存在。
-
-  ## 3. 清理新的构建和安装目录
-
-  只删除 CentOS 专用目录，不动仓库原构建结果：
-
-  rm -rf "$SMT_BUILD"
-  rm -rf "$SMT_INSTALL"
-
-  ## 4. 配置 smt-switch
-
-  cd "$SMT_SRC"
-
-  ./configure.sh \
-    --build-dir="$SMT_BUILD" \
-    --prefix="$SMT_INSTALL" \
-    --bitwuzla \
-    --bitwuzla-dir="$PREFIX" \
-    --cvc5 \
-    --cvc5-home="$SMT_SRC/deps/cvc5" \
-    --smtlib-reader \
-    --bison-dir="$PREFIX" \
-    --flex-dir="$PREFIX" \
-    --without-tests \
-    --static \
-    -DCMAKE_PREFIX_PATH="$PREFIX" \
-    -DGMP_INCLUDE_DIR="$PREFIX/include" \
-    -DGMP_LIBRARIES="$PREFIX/lib/libgmp.a" \
-    -DGMPXX_LIBRARIES="$PREFIX/lib/libgmpxx.a"
-
-  配置输出中重点确认：
-
-  Found GMP
-  Found BISON
-  Found FLEX
-  Found bitwuzla
-
-  如果配置阶段提示找不到 Bitwuzla，先执行：
+  检查 Bitwuzla：
 
   BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
+
+  echo "$BITWUZLA_PC"
+
   export PKG_CONFIG_PATH="$(dirname "$BITWUZLA_PC"):$PKG_CONFIG_PATH"
 
+  pkg-config --modversion bitwuzla
   pkg-config --cflags bitwuzla
   pkg-config --libs bitwuzla
 
-  然后删除 $SMT_BUILD 并重新配置。
+  上面任何必需文件缺失，都应先停止。
 
-  ## 5. 编译 smt-switch
+  ## 3. 定位 gflags 的 CMake 配置
 
-  先单线程：
+  GFLAGS_CONFIG=$(find "$PREFIX" \
+    \( -name 'gflags-config.cmake' -o -name 'gflagsConfig.cmake' \) \
+    | head -1)
 
-  cmake --build "$SMT_BUILD" -j1
+  echo "$GFLAGS_CONFIG"
 
-  如果成功，安装：
+  GFLAGS_CMAKE_DIR=$(dirname "$GFLAGS_CONFIG")
+  echo "$GFLAGS_CMAKE_DIR"
 
-  cmake --install "$SMT_BUILD"
+  输出不能为空。
 
-  ## 6. 验证安装结果
+  ## 4. 创建全新的 FORWORD 构建目录
 
-  find "$SMT_INSTALL" \
-    \( -name 'libsmt-switch.a' -o \
-       -name 'libsmt-switch-bitwuzla.a' -o \
-       -name 'libsmt-switch-cvc5.a' -o \
-       -name 'smt.h' \) \
-    -print
+  rm -rf "$ROOT/build-centos7"
 
-  必须存在：
+  直接调用 CMake，不使用会删除原 build/ 的 configure.sh：
 
-  local-centos7/lib/libsmt-switch.a
-  local-centos7/lib/libsmt-switch-bitwuzla.a
-  local-centos7/lib/libsmt-switch-cvc5.a
-  local-centos7/include/smt-switch/smt.h
+  cmake \
+    -S "$ROOT" \
+    -B "$ROOT/build-centos7" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DWASIM_LIB_TYPE=STATIC \
+    -DBUILD_PYTHON_BINDINGS=OFF \
+    -DCMAKE_PREFIX_PATH="$PREFIX" \
+    -DCMAKE_INCLUDE_PATH="$PREFIX/include" \
+    -DCMAKE_LIBRARY_PATH="$PREFIX/lib;$PREFIX/lib64" \
+    -DGMP_INCLUDE_DIR="$PREFIX/include" \
+    -DGMP_LIBRARY="$PREFIX/lib/libgmp.a" \
+    -DBISON_EXECUTABLE="$PREFIX/bin/bison" \
+    -DFLEX_EXECUTABLE="$PREFIX/bin/flex" \
+    -DBOOST_ROOT="$PREFIX" \
+    -DBoost_ROOT="$PREFIX" \
+    -DBoost_NO_SYSTEM_PATHS=ON \
+    -DBoost_USE_STATIC_LIBS=ON \
+    -Dgflags_DIR="$GFLAGS_CMAKE_DIR"
 
-  检查格式：
+  配置输出中确认：
 
-  file \
-    "$SMT_INSTALL/lib/libsmt-switch.a" \
-    "$SMT_INSTALL/lib/libsmt-switch-bitwuzla.a" \
-    "$SMT_INSTALL/lib/libsmt-switch-cvc5.a"
+  Found BISON
+  Found FLEX
+  Found Boost
+  Found GMP
+  Found PkgConfig
 
-  均应显示：
+  并且不能出现：
 
-  current ar archive
+  /home/jiongming
 
-  ## 7. 让 FORWORD 使用新的 smt-switch
+  检查生成的缓存：
 
-  FORWORD 固定寻找：
+  grep -E \
+    'BISON_EXECUTABLE|FLEX_EXECUTABLE|Boost_INCLUDE_DIR|GMP_INCLUDE_DIR|GMP_LIBRARY|gflags_DIR' \
+    "$ROOT/build-centos7/CMakeCache.txt"
 
-  deps/smt-switch/local
+  所有路径都应指向 CentOS 当前目录或 .local-centos7。
 
-  备份原安装目录：
+  ## 5. 编译 FORWORD
 
-  cd "$SMT_SRC"
+  第一次单线程：
 
-  if [ -e local ] && [ ! -e local-original ]; then
-      mv local local-original
-  fi
+  cmake --build "$ROOT/build-centos7" -j1
 
-  创建指向 CentOS 原生安装结果的符号链接：
-
-  ln -s local-centos7 local
-
-  确认：
-
-  ls -ld "$SMT_SRC/local"
+  成功后，确认程序：
 
   ls -lh \
-    "$SMT_SRC/local/lib/libsmt-switch.a" \
-    "$SMT_SRC/local/lib/libsmt-switch-bitwuzla.a" \
-    "$SMT_SRC/local/lib/libsmt-switch-cvc5.a"
+    "$ROOT/build-centos7/bmc" \
+    "$ROOT/build-centos7/cec"
 
-  ## 8. 注意 cvc5 兼容性
+  ## 6. 检查运行时依赖
 
-  当前 cvc5 是仓库中携带的预编译静态库，不是 CentOS 原生构建。它可能在 smt-switch 编译阶段正常，但在最终链接 FORWORD 时出现：
+  ldd "$ROOT/build-centos7/bmc"
+  ldd "$ROOT/build-centos7/cec"
 
-  GLIBCXX_x.x not found
-  undefined reference
+  不能出现：
 
-  如果 smt-switch 在 cvc5 部分失败，请保留第一条链接错误。此时需要判断是缺少依赖库，还是 cvc5 与 CentOS ABI 不兼容。
+  not found
 
-  smt-switch 成功后，下一步就是配置和编译 FORWORD 主项目。
+  确认程序能启动：
+
+  "$ROOT/build-centos7/bmc" --help
+  "$ROOT/build-centos7/cec" --help
+
+  如果程序参数不支持 --help，只要没有出现动态库缺失、GLIBC 或 GLIBCXX 错误即可。
+
+  ## 7. 最终验证
+
+  由于远程仓库已经删除 benchmark，你需要使用本地已有的 .btor2 文件：
+
+  find "$ROOT/benchmark" -name '*.btor2' | head
+
+  如果本地仍有 benchmark，例如：
+
+  "$ROOT/build-centos7/bmc" \
+    --file "$ROOT/benchmark/bmc_benchmark/aes/aes_1.btor2" \
+    --iteration 100 \
+    --bound 10 \
+    --find_unsat 20 \
+    --find_sat 1
+
+  若主项目编译失败，请保留第一条 error: 或 undefined reference。最可能剩余的问题是仓库携带的 cvc5 静态库与 CentOS 7 的 ABI 兼
+  容性。
