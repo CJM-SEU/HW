@@ -1,8 +1,119 @@
-先检查服务器是否藏有其他 Python：
+可以，不需要查看 Makefile 内容。最可能是当前源码目录或构建目录里残留了异常配置。我们改用 /tmp 中全新解压的源码和构建目录，并
+  使用短路径安装，避开现有 Makefile。
 
-  for p in python3.7 python3.8 python3.9 python3.10 python3.11; do
-      command -v "$p" >/dev/null 2>&1 && {
-          echo "$p: $(command -v "$p")"
-          "$p" --version
-      }
-  done
+  ## 方案一：在 /tmp 全新构建
+
+  先确认压缩包完整：
+
+  sha256sum \
+    /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages/Python-3.8.18.tgz
+
+  正确 SHA-256 是：
+
+  7c5df68bab1be81a52dea0cc2e2705ea00553b67107a301188383d7b57320b16
+
+  然后完全重新解压：
+
+  rm -rf /tmp/cwx-python-3.8.18-src
+  rm -rf /tmp/cwx-python-3.8.18-build
+
+  mkdir -p /tmp/cwx-python-3.8.18-src
+  mkdir -p /tmp/cwx-python-3.8.18-build
+
+  tar -xzf \
+    /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages/Python-3.8.18.tgz \
+    -C /tmp/cwx-python-3.8.18-src \
+    --strip-components=1
+
+  清理可能影响配置的环境变量：
+
+  unset CONFIG_SITE
+  unset PYTHONHOME
+  unset PYTHONPATH
+  unset PROFILE_TASK
+  unset MAKEFLAGS
+  unset MFLAGS
+
+  使用短安装路径：
+
+  mkdir -p /hongfeng/cwx1485722/python38
+
+  cd /tmp/cwx-python-3.8.18-build
+
+  下面的配置命令请完整写在一行，不使用反斜杠换行：
+
+  /tmp/cwx-python-3.8.18-src/configure --prefix=/hongfeng/cwx1485722/python38 --without-ensurepip
+
+  确认配置成功后，不使用变量，先单线程编译：
+
+  /usr/bin/make
+
+  如果成功：
+
+  /usr/bin/make install
+
+  验证：
+
+  /hongfeng/cwx1485722/python38/bin/python3.8 --version
+
+  预期：
+
+  Python 3.8.18
+
+  这里同时规避了：
+
+  - 原源码目录中的残留配置；
+  - 原 host-build 中损坏的 Makefile；
+  - 过长的安装路径；
+  - JOBS 或 MAKEFLAGS 异常；
+  - 非预期的 make 命令。
+
+  ## 如果仍然在第 211 行失败
+
+  可以让 Make 忽略 Makefile 中保存的配置参数行。Python Makefile 第 211 行附近属于配置参数区域，并非实际编译规则。执行：
+
+  cd /tmp/cwx-python-3.8.18-build
+
+  cp Makefile Makefile.backup
+
+  awk '
+    /^CONFIG_ARGS=/ {
+      print "CONFIG_ARGS="
+      next
+    }
+    { print }
+  ' Makefile > Makefile.fixed
+
+  mv Makefile.fixed Makefile
+
+  然后：
+
+  /usr/bin/make
+  /usr/bin/make install
+
+  ## 如果 Python 编译成功但部分模块失败
+
+  CentOS 7 缺少开发包时，可能显示类似：
+
+  The necessary bits to build these optional modules were not found
+  _ssl
+  _bz2
+  _lzma
+
+  对于运行 Meson，这些通常不是致命问题。主要确认下面命令可执行：
+
+  /hongfeng/cwx1485722/python38/bin/python3.8 \
+    /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages/meson-0.64.1/meson.py \
+    --version
+
+  如果 Meson 尚未解压：
+
+  cd /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages
+
+  tar -xzf meson-0.64.1.tar.gz
+
+  然后再执行版本检查，预期为：
+
+  0.64.1
+
+  优先尝试 /tmp 全新解压、短路径、单行 configure 的方案；它不需要你提供 Makefile 内容。
