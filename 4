@@ -1,88 +1,61 @@
-在linux机上，路径为/hongfeng/cwx1485722/code/
-  forword_exp/FORWORD-HW-main,cwx是我的用户名
+原因很明确：之前配置时启用了：
 
+  -DGFLAGS_BUILD_PACKAGING=ON
 
-• 明白。后续统一使用以下路径，并把依赖安装在项目内部，避
-  免依赖 $HOME 的实际位置：
+  这会启用 CPack 安装包生成，但 GitHub 源码压缩包中缺少 doc/index.html，导致 CPack 配置失败。FORWORD 只需要 gflags 的头文件和
+  静态库，不需要生成安装包，因此关闭 packaging 即可。
+
+  先删除失败的 gflags 构建目录：
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
   export JOBS=$(nproc)
 
-  cd "$ROOT"
+  rm -rf "$ROOT/host-build/gflags"
 
-  mkdir -p "$PREFIX" "$ROOT/host-build" "$ROOT/packages"
+  重新配置：
 
-  export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:
-  $PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-  export CMAKE_PREFIX_PATH="$PREFIX"
+  cmake \
+    -S "$ROOT/packages/gflags-2.2.2" \
+    -B "$ROOT/host-build/gflags" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DBUILD_STATIC_LIBS=ON \
+    -DBUILD_TESTING=OFF \
+    -DGFLAGS_BUILD_TESTING=OFF \
+    -DGFLAGS_BUILD_PACKAGING=OFF \
+    -DGFLAGS_BUILD_gflags_LIB=ON \
+    -DGFLAGS_BUILD_gflags_nothreads_LIB=OFF \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 
-  建议创建环境脚本，方便每次登录后恢复环境：
+  如果配置末尾没有报错，编译并安装：
 
-  cd /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+  cmake --build "$ROOT/host-build/gflags" -j"$JOBS"
+  cmake --install "$ROOT/host-build/gflags"
 
-  cat > env-centos7.sh <<'EOF'
-  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export PREFIX=$ROOT/.local-centos7
-  export JOBS=$(nproc)
+  验证结果：
 
-  export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$ROOT/host-build/pkgconfig:
-  $PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:
-  ${PKG_CONFIG_PATH:-}"
-  export CMAKE_PREFIX_PATH="$PREFIX"
-  EOF
+  find "$PREFIX" \
+    \( -name 'libgflags.a' -o \
+       -name 'gflags-config.cmake' -o \
+       -name 'gflagsConfig.cmake' \) \
+    -print
 
-  source env-centos7.sh
+  ls -l "$PREFIX/include/gflags/gflags.h"
 
-  然后先执行这一组，不要急着重新编译全部依赖：
+  还可以让 CMake 验证配置包：
 
-  cd "$ROOT"
+  find "$PREFIX" -path '*cmake/gflags*' -type f -print
 
-  deps/bison/bison-install/bin/bison --version
-  deps/flex/flex-install/bin/flex --version
+  预期至少能找到：
 
-  file deps/bison/bison-install/bin/bison
-  file deps/flex/flex-install/bin/flex
+  .local-centos7/lib/libgflags.a
+  .local-centos7/include/gflags/gflags.h
+  .local-centos7/lib/cmake/gflags/gflags-config.cmake
 
-  ldd deps/bison/bison-install/bin/bison
-  ldd deps/flex/flex-install/bin/flex
+  如果仍然触发 CPack，可以额外加入：
 
-  如果 Bison 和 Flex 都能正常运行，继续检查已有静态库：
+  -DCPACK_GENERATOR=""
 
-  cd "$ROOT"
-
-  ls -lh \
-    deps/gmp-install/lib/libgmp.a \
-    deps/glog/install/lib/libglog.a \
-    deps/smt-switch/local/lib/libsmt-switch.a \
-    deps/smt-switch/local/lib/libsmt-switch-bitwuzla.a \
-    deps/smt-switch/local/lib/libsmt-switch-cvc5.a \
-    deps/smt-switch/deps/install/lib/x86_64-linux-gnu/
-    libbitwuzla.a \
-    deps/btor2tools/build/lib/libbtor2parser.a
-
-  将这两组命令的输出发给我。接下来我会根据结果判断：
-
-  - Bison/Flex 是否需要重编；
-  - 仓库携带的依赖库是否齐全；
-  - 是先直接配置 FORWORD，还是先本地构建 Boost、gflags、
-    GMP 等依赖。
-
-  后续所有命令中的安装位置都会是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-
-  main/.local-centos7
-
-  不会使用 sudo、conda 或系统目录。
+  不过正常情况下 -DGFLAGS_BUILD_PACKAGING=OFF 就足够。
