@@ -1,6 +1,59 @@
-./build/bmc --file /home/jiongming/desktop/FORWORD/benchmark/bmc_benchmark/seq/counter_wrapper_1_2/counter_bit_width_large.btor2\
-  --iteration 200 \
-  --bound 10 \
-  --find_unsat 200 \
-  --find_sat 1  \
-  2>&1 | tee logs/run-bmc_50.log
+Python 3.8 比 Python 3.10 更适合老 CentOS 7 环境。需要在联网机器上把下面两个包加入 packages/：
+
+  Python-3.8.18.tgz
+  meson-0.64.1.tar.gz
+
+  然后在 CentOS 用户目录编译 Python：
+
+  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+  export PREFIX=$ROOT/.local-centos7
+  export JOBS=$(nproc)
+
+  cd "$ROOT/packages"
+
+  tar -xzf Python-3.8.18.tgz
+  cd Python-3.8.18
+
+  ./configure \
+    --prefix="$PREFIX/python-3.8" \
+    --without-ensurepip
+
+  make -j"$JOBS"
+  make install
+
+  验证：
+
+  "$PREFIX/python-3.8/bin/python3.8" --version
+
+  然后解压并运行 Meson：
+
+  cd "$ROOT/packages"
+
+  tar -xzf meson-0.64.1.tar.gz
+
+  "$PREFIX/python-3.8/bin/python3.8" \
+    "$ROOT/packages/meson-0.64.1/meson.py" \
+    --version
+
+  ## 使用离线 Meson 构建 Bitwuzla
+
+  确认 Meson 显示 0.64.1 后：
+
+  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+  export PREFIX=$ROOT/.local-centos7
+  export JOBS=$(nproc)
+
+  export PYTHON38="$PREFIX/python-3.8/bin/python3.8"
+  export MESON="$ROOT/packages/meson-0.64.1/meson.py"
+  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+  不要调用 Bitwuzla 自带的 configure.py，因为它会寻找名为 meson 的命令。直接运行 Meson：
+
+  "$PYTHON38" "$MESON" install \
+    -C "$ROOT/host-build/bitwuzla"
+
+  验证：
+
+  find "$PREFIX" \
+    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
+    -print
