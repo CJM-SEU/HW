@@ -1,331 +1,159 @@
-## 1. 设置独立构建环境
+在项目内部重新编译即可，不需要 sudo。由于原源码目录可能保留了其他机器的配置结果，先复制一份源码到独立目录，再编译，避免污染
+  原目录。
 
-  在 CentOS 7 的 FORWORD-HW 根目录执行：
+  先加载环境：
 
-  cd /path/to/FORWORD-HW
+  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+  export PREFIX=$ROOT/.local-centos7
+  export JOBS=$(nproc)
 
-  export ROOT="$PWD"
-  export PREFIX="$HOME/.local/forword"
-  export JOBS="$(nproc)"
-
-  mkdir -p "$PREFIX" "$ROOT/host-build" "$ROOT/packages"
+  mkdir -p "$PREFIX" "$ROOT/host-build"
 
   export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  ${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:
-  $PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-  export CMAKE_PREFIX_PATH="$PREFIX"
-
-  以后每次重新登录服务器，都要重新执行这些 export，建议保
-  存成：
-
-  source env-centos7.sh
-
-  ## 2. 先测试仓库自带的 Flex/Bison
-
-  deps/bison/bison-install/bin/bison --version
-  deps/flex/flex-install/bin/flex --version
-
-  如果分别显示 Bison 3.7.x 和 Flex 2.6.4，并且没有
-  GLIBC_x.xx not found，可以先复用它们。
-
-  如果不能运行，重新编译：
-
-  ### 编译 Bison
-
-  mkdir -p host-build/bison
-  cd host-build/bison
-
-  "$ROOT/deps/bison/configure" \
-    --prefix="$PREFIX"
-
-  make -j"$JOBS"
-  make install
-
-  ### 编译 Flex
+  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
   cd "$ROOT"
-  mkdir -p host-build/flex
-  cd host-build/flex
 
-  CFLAGS="-O2 -D_GNU_SOURCE" \
-  "$ROOT/deps/flex/configure" \
-    --prefix="$PREFIX"
+  ## 1. 重新编译 Bison 3.7
 
+  复制源码并清除原机器生成的配置缓存：
+
+  cd "$ROOT"
+
+  cp -a deps/bison host-build/bison-src
+
+  cd host-build/bison-src
+
+  rm -f config.status config.cache config.log
+  find . -name config.cache -delete
+
+  配置到项目内部的 .local-centos7：
+
+  cd "$ROOT/host-build/bison-src"
+
+  ./configure \
+    --prefix="$PREFIX" \
+    --disable-nls
+
+  如果配置成功：
+
+  make clean 2>/dev/null || true
   make -j"$JOBS"
   make install
 
   验证：
 
   "$PREFIX/bin/bison" --version
-  "$PREFIX/bin/flex" --version
+  ldd "$PREFIX/bin/bison"
 
-  要求：
+  应该显示类似：
 
-  - Bison ≥ 3.4.2
-  - Flex ≥ 2.6.4
+  bison (GNU Bison) 3.7
 
-  ## 3. 重新编译 GMP
+  且不能再出现 GLIBC_x.xx not found。
 
-  不要依赖仓库中从原机器复制来的 GMP 库，建议在 CentOS 7
-  上重新编译：
+  ### 如果 Bison 编译遇到文档错误
+
+  如果看到 help2man、makeinfo、texi2dvi 等缺失，可尝试：
+
+  cd "$ROOT/host-build/bison-src"
+
+  make -j"$JOBS" MAKEINFO=true
+  make install MAKEINFO=true
+
+  ## 2. 重新编译 Flex 2.6.4
+
+  同样复制一份源码：
 
   cd "$ROOT"
-  mkdir -p host-build/gmp
-  cd host-build/gmp
 
-  "$ROOT/deps/gmp-6.3.0/configure" \
+  cp -a deps/flex host-build/flex-src
+
+  cd host-build/flex-src
+
+  rm -f config.status config.cache config.log
+  find . -name config.cache -delete
+
+  配置：
+
+  cd "$ROOT/host-build/flex-src"
+
+  CFLAGS="-O2 -fPIC -D_GNU_SOURCE" \
+  CXXFLAGS="-O2 -fPIC" \
+  ./configure \
     --prefix="$PREFIX" \
-    --enable-static \
     --disable-shared \
-    --with-pic
+    --enable-static
 
+  编译安装：
+
+  make clean 2>/dev/null || true
   make -j"$JOBS"
   make install
 
   验证：
 
-  test -f "$PREFIX/include/gmp.h" && echo "GMP header OK"
-  test -f "$PREFIX/lib/libgmp.a" && echo "GMP library OK"
+  "$PREFIX/bin/flex" --version
+  ldd "$PREFIX/bin/flex"
 
-  ## 4. 安装 Boost
+  应显示：
 
-  仓库没有携带 Boost 源码，需要下载。推荐 Boost 1.82.0。
+  flex 2.6.4
 
-  如果服务器可以访问外网：
+  ## 3. 确认当前使用的是新版本
 
-  cd "$ROOT/packages"
+  export PATH="$PREFIX/bin:$PATH"
 
-  curl -L -o boost_1_82_0.tar.gz \
+  which bison
+  which flex
 
-    https://archives.boost.io/release/1.82.0/source/boost_1_82_0.tar.gz
+  bison --version
+  flex --version
 
-  tar -xzf boost_1_82_0.tar.gz
-  cd boost_1_82_0
+  预期路径是：
 
-  ./bootstrap.sh --prefix="$PREFIX"
+  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7/bin/bison
+  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7/bin/flex
 
-  ./b2 -j"$JOBS" \
-    --with-system \
-    --with-filesystem \
-    link=static \
-    runtime-link=shared \
-    variant=release \
-    cxxflags="-fPIC" \
-    install
+  检查版本是否满足项目要求：
 
-  验证：
+  bison --version | head -1
+  flex --version
 
-  ls "$PREFIX/include/boost/version.hpp"
-  find "$PREFIX" -name 'libboost_system*' -o -name
-  'libboost_filesystem*'
+  ## 4. 更新后续构建环境
 
-  如果服务器不能联网，在能联网的电脑上下载
-  boost_1_82_0.tar.gz，复制到服务器的 packages/ 后从 tar
-  命令继续。
+  将下列内容写入或追加到 env-centos7.sh：
 
-  ## 5. 安装 gflags
+  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
+  export PREFIX=$ROOT/.local-centos7
+  export JOBS=$(nproc)
 
-  cd "$ROOT/packages"
-
-  curl -L -o gflags-2.2.2.tar.gz \
-
-    https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz
-
-  tar -xzf gflags-2.2.2.tar.gz
-
-  cmake \
-    -S gflags-2.2.2 \
-    -B "$ROOT/host-build/gflags" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DBUILD_STATIC_LIBS=ON \
-    -DBUILD_TESTING=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
-  cmake --build "$ROOT/host-build/gflags" -j"$JOBS"
-  cmake --install "$ROOT/host-build/gflags"
-
-  验证：
-
-  find "$PREFIX" -name 'gflags-config.cmake' -o -name
-  'libgflags.a'
-
-  ## 6. 重新编译 glog
-
-  cd "$ROOT"
-
-  cmake \
-    -S deps/glog \
-    -B host-build/glog \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$ROOT/deps/glog/install-
-    centos7" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DWITH_GFLAGS=OFF \
-    -DBUILD_TESTING=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
-  cmake --build host-build/glog -j"$JOBS"
-  cmake --install host-build/glog
-
-  但是 FORWORD 的 CMake 当前硬编码使用：
-
-  deps/glog/install/lib/libglog.a
-
-  因此先不要覆盖旧文件。后续配置时若确定要用新库，最好修
-  改 CMake 路径。你也可以临时备份并替换：
-
-  mv deps/glog/install deps/glog/install-original
-  mv deps/glog/install-centos7 deps/glog/install
-
-  这只是在服务器本地调整依赖，不需要提交到 GitHub。
-
-  ## 7. 修正 Bitwuzla 的 pkg-config 文件
-
-  仓库里的：
-
-  deps/smt-switch/deps/install/lib/pkgconfig/bitwuzla.pc
-
-  包含原机器路径：
-
-  /home/jiongming/FORWORD_build/...
-
-  必须在 CentOS 7 上生成一份修正版本：
-
-  cd "$ROOT"
-
-  mkdir -p host-build/pkgconfig
-
-  sed \
-    -e "s#^prefix=.*#prefix=$ROOT/deps/smt-switch/deps/
-    install#" \
-    -e "s#-L/home/jiongming/FORWORD_build/deps/gmp-
-    install/lib#-L$PREFIX/lib#g" \
-    deps/smt-switch/deps/install/lib/pkgconfig/
-    bitwuzla.pc \
-    > host-build/pkgconfig/bitwuzla.pc
-
-  export PKG_CONFIG_PATH="$ROOT/host-build/pkgconfig:
-  $PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
-
-  验证：
-
-  pkg-config --modversion bitwuzla
-  pkg-config --cflags bitwuzla
-  pkg-config --libs bitwuzla
-
-  输出中不能再出现 /home/jiongming/FORWORD_build。
-
-  ## 8. 重新编译 btor2tools
-
-  cd "$ROOT"
-
-  cmake \
-    -S deps/btor2tools \
-    -B host-build/btor2tools \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
-  cmake --build host-build/btor2tools -j"$JOBS"
-
-  顶层 CMake 固定寻找：
-
-  deps/btor2tools/build/lib/libbtor2parser.a
-
-  可以先备份旧 build，再放置 CentOS 7 构建结果：
-
-  mv deps/btor2tools/build deps/btor2tools/build-original
-  mv host-build/btor2tools deps/btor2tools/build
-
-  确认：
-
-  ls -l deps/btor2tools/build/lib/libbtor2parser.a
-
-  ## 9. 配置 FORWORD
-
-  不要运行 ./configure.sh，因为它会删除原有 build。使用新
-  的 build-centos7：
-
-  cd "$ROOT"
-
-  export PATH="$PREFIX/bin:$ROOT/deps/bison/bison-
-  install/bin:$ROOT/deps/flex/flex-install/bin:$PATH"
-  export PKG_CONFIG_PATH="$ROOT/host-build/pkgconfig:
-  $PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
+  export PATH="$PREFIX/bin:$PATH"
+  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
+  export CPATH="$PREFIX/include:${CPATH:-}"
+  export PKG_CONFIG_PATH="$ROOT/host-build/pkgconfig:$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
   export CMAKE_PREFIX_PATH="$PREFIX"
 
+  之后执行：
+
+  source "$ROOT/env-centos7.sh"
+
+  ## 5. 用 CMake 测试能否找到它们
+
+  cd "$ROOT"
+
   cmake \
-    -S "$ROOT" \
-    -B "$ROOT/build-centos7" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DWASIM_LIB_TYPE=STATIC \
-    -DBUILD_PYTHON_BINDINGS=OFF \
-    -DCMAKE_PREFIX_PATH="$PREFIX" \
-    -DGMP_INCLUDE_DIR="$PREFIX/include" \
-    -DGMP_LIBRARY="$PREFIX/lib/libgmp.a" \
+    -S . \
+    -B build-centos7 \
     -DBISON_EXECUTABLE="$PREFIX/bin/bison" \
     -DFLEX_EXECUTABLE="$PREFIX/bin/flex" \
-    -DBoost_NO_SYSTEM_PATHS=ON \
-    -DBOOST_ROOT="$PREFIX"
+    -DCMAKE_PREFIX_PATH="$PREFIX"
 
-  如果你复用仓库自带的 Bison/Flex，则把最后两项改成：
+  这一阶段很可能继续提示缺少 Boost、GMP 或 gflags，这是正常的；它的目的只是确认输出中出现：
 
-  -DBISON_EXECUTABLE="$ROOT/deps/bison/bison-install/bin/
-  bison" \
-  -DFLEX_EXECUTABLE="$ROOT/deps/flex/flex-install/bin/
-  flex" \
+  Found BISON: .../.local-centos7/bin/bison
+  Found FLEX: .../.local-centos7/bin/flex
 
-  ## 10. 编译
-
-  CMake 配置成功后：
-
-  cmake --build "$ROOT/build-centos7" -j"$JOBS"
-
-  确认程序已生成：
-
-  ls -lh build-centos7/bmc build-centos7/cec
-
-  查看动态库依赖：
-
-  ldd build-centos7/bmc
-  ldd build-centos7/cec
-
-  如果出现 not found，先执行：
-
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:
-  $ROOT/deps/smt-switch/deps/cvc5/lib:
-  ${LD_LIBRARY_PATH:-}"
-
-  ## 11. 运行一个简单测试
-
-  仓库现在的 benchmark 路径是 benchmark/bmc_benchmark 和
-  benchmark/cec_benchmark，先找一个测试文件：
-
-  find benchmark -name '*.btor2' | head
-
-  然后运行，例如：
-
-  ./build-centos7/bmc \
-    --file benchmark/bmc_benchmark/aes/aes_1.btor2 \
-    --iteration 100 \
-    --bound 10 \
-    --find_unsat 20 \
-    --find_sat 1
-
-  最可能在第 9 步遇到问题，因为仓库中的 libsmt-
-  switch*.a、Bitwuzla 和 cvc5 是从原机器复制来的。如果
-  CMake 配置或链接失败，请把以下两部分完整输出发给我：
-
-  cmake ... 2>&1 | tee configure-centos7.log
-  cmake --build build-centos7 -j"$JOBS" 2>&1 | tee build-
-  centos7.log
-
-  尤其保留从第一条 error: 或 undefined reference 开始往前
-  后约 30 行的内容。
+  如果 Bison 或 Flex 的 configure/make 失败，把从第一条 error: 往前后约 30 行的完整输出发给我。
