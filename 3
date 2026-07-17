@@ -1,135 +1,136 @@
-python3.8.18通过tmp方案安装完毕了，接下来做什么
+问题是 Python 构建时缺少 libffi，导致 _ctypes 没有生成。libffi 3.4.4 已上传至：
 
+  CJM-SEU/baobao (https://github.com/CJM-SEU/baobao)
 
-• 接下来用 Python 3.8 运行离线 Meson，然后原生编译 Bitwuzla。
+  最新提交：8557dae
 
-  ## 1. 解压并验证 Meson
+  你只需把 libffi-3.4.4.tar.gz 复制到 CentOS 的：
+
+  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages/
+
+  ## 1. 编译安装 libffi
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export PREFIX=$ROOT/.local-centos7
-  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
-  export MESON_SRC=$ROOT/packages/meson-0.64.1
+  export FFI_PREFIX=$ROOT/.local-centos7/libffi
   export JOBS=$(nproc)
 
-  cd "$ROOT/packages"
+  rm -rf /tmp/cwx-libffi-3.4.4-src
+  rm -rf /tmp/cwx-libffi-3.4.4-build
 
-  rm -rf meson-0.64.1
-  tar -xzf meson-0.64.1.tar.gz
+  mkdir -p /tmp/cwx-libffi-3.4.4-src
+  mkdir -p /tmp/cwx-libffi-3.4.4-build
+
+  校验压缩包：
+
+  sha256sum "$ROOT/packages/libffi-3.4.4.tar.gz"
+
+  预期：
+
+  d66c56ad259a82cf2a9dfc408b32bf5da52371500b84745f7fb8b645712df676
+
+  解压：
+
+  tar -xzf "$ROOT/packages/libffi-3.4.4.tar.gz" \
+    -C /tmp/cwx-libffi-3.4.4-src \
+    --strip-components=1
+
+  配置：
+
+  cd /tmp/cwx-libffi-3.4.4-build
+
+  CFLAGS="-O2 -fPIC" \
+  /tmp/cwx-libffi-3.4.4-src/configure \
+    --prefix="$FFI_PREFIX"
+
+  编译安装：
+
+  make -j"$JOBS"
+  make install
 
   验证：
 
+  find "$FFI_PREFIX" \
+    \( -name 'ffi.h' -o -name 'libffi.so*' -o -name 'libffi.a' -o -name 'libffi.pc' \) \
+    -print
+
+  ## 2. 使用 libffi 重新构建 Python
+
+  旧 Python 安装可以直接覆盖，但构建目录必须全新创建：
+
+  export PYTHON_PREFIX=/hongfeng/cwx1485722/python38
+  export PYTHON_ARCHIVE=$ROOT/packages/Python-3.8.18.tgz
+
+  rm -rf /tmp/cwx-python-3.8.18-src
+  rm -rf /tmp/cwx-python-3.8.18-build
+
+  mkdir -p /tmp/cwx-python-3.8.18-src
+  mkdir -p /tmp/cwx-python-3.8.18-build
+
+  tar -xzf "$PYTHON_ARCHIVE" \
+    -C /tmp/cwx-python-3.8.18-src \
+    --strip-components=1
+
+  设置 libffi 环境：
+
+  export PKG_CONFIG_PATH="$FFI_PREFIX/lib/pkgconfig:$FFI_PREFIX/lib64/pkgconfig"
+  export LD_LIBRARY_PATH="$FFI_PREFIX/lib:$FFI_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
+
+  export LIBFFI_CFLAGS="$(pkg-config --cflags libffi)"
+  export LIBFFI_LIBS="$(pkg-config --libs libffi)"
+
+  pkg-config --modversion libffi
+  pkg-config --cflags libffi
+  pkg-config --libs libffi
+
+  重新配置 Python：
+
+  cd /tmp/cwx-python-3.8.18-build
+
+  unset CONFIG_SITE PYTHONHOME PYTHONPATH PROFILE_TASK MAKEFLAGS MFLAGS
+
+  CPPFLAGS="$LIBFFI_CFLAGS" \
+  LDFLAGS="-L$FFI_PREFIX/lib -L$FFI_PREFIX/lib64 -Wl,-rpath,$FFI_PREFIX/lib -Wl,-rpath,$FFI_PREFIX/lib64" \
+  LIBFFI_CFLAGS="$LIBFFI_CFLAGS" \
+  LIBFFI_LIBS="$LIBFFI_LIBS" \
+  /tmp/cwx-python-3.8.18-src/configure \
+    --prefix="$PYTHON_PREFIX" \
+    --without-ensurepip \
+    --with-system-ffi
+
+  编译并覆盖安装：
+
+  make -j"$JOBS"
+  make install
+
+  ## 3. 验证 _ctypes
+
+  export LD_LIBRARY_PATH="$FFI_PREFIX/lib:$FFI_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
+
+  /hongfeng/cwx1485722/python38/bin/python3.8 -c \
+  'import ctypes; print("ctypes OK:", ctypes.__file__)'
+
+  如果成功，会输出类似：
+
+  ctypes OK: /hongfeng/cwx1485722/python38/lib/python3.8/ctypes/__init__.py
+
+  进一步确认底层模块：
+
+  /hongfeng/cwx1485722/python38/bin/python3.8 -c \
+  'import _ctypes; print("_ctypes OK:", _ctypes.__file__)'
+
+  ## 4. 再次运行 Meson
+
+  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
+  export MESON_SRC=$ROOT/packages/meson-0.64.1
+
+  cd "$ROOT/packages"
+
+  test -d meson-0.64.1 || tar -xzf meson-0.64.1.tar.gz
+
   "$PYTHON38" "$MESON_SRC/meson.py" --version
-  ninja --version
 
   预期：
 
   0.64.1
-  1.12.0
 
-  ## 2. 设置构建环境
-
-  export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-  export CMAKE_PREFIX_PATH="$PREFIX"
-
-  检查 GCC：
-
-  gcc --version | head -1
-  g++ --version | head -1
-
-  应当仍是 GCC/G++ 10.3.0。
-
-  ## 3. 确认 Bitwuzla 的离线子项目存在
-
-  cd "$ROOT/deps/smt-switch/deps/bitwuzla"
-
-  find subprojects -maxdepth 2 -type d | sort | head -50
-
-  并检查关键源码：
-
-  test -f meson.build && echo "Bitwuzla source OK"
-  test -f src/main/main.cpp && echo "Bitwuzla main source OK"
-
-  ## 4. 创建全新的 CentOS 构建目录
-
-  不要使用仓库携带的 deps/.../bitwuzla/build，那个目录来自原机器。
-
-  rm -rf "$ROOT/host-build/bitwuzla"
-  mkdir -p "$ROOT/host-build"
-
-  配置：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" setup \
-    "$ROOT/host-build/bitwuzla" \
-    "$ROOT/deps/smt-switch/deps/bitwuzla" \
-    --prefix="$PREFIX" \
-    --buildtype=release \
-    --default-library=static \
-    -Dtesting=disabled \
-    -Dunit_testing=disabled \
-    -Dpython=false \
-    -Ddocs=false
-
-  配置成功时，末尾应出现类似：
-
-  Build targets in project: ...
-  Found ninja-1.12.0
-
-  并且不应尝试联网下载依赖。
-
-  ## 5. 编译 Bitwuzla
-
-  为了便于定位错误，第一次使用单线程：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" compile \
-    -C "$ROOT/host-build/bitwuzla" \
-    -j 1
-
-  如果单线程成功，以后可以使用：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" compile \
-    -C "$ROOT/host-build/bitwuzla" \
-    -j "$JOBS"
-
-  ## 6. 安装到 .local-centos7
-
-  "$PYTHON38" "$MESON_SRC/meson.py" install \
-    -C "$ROOT/host-build/bitwuzla"
-
-  不需要 sudo，因为安装前缀是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7
-
-  ## 7. 验证原生安装
-
-  find "$PREFIX" \
-    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
-    -print
-
-  检查 pkg-config：
-
-  find "$PREFIX" -name bitwuzla.pc -exec grep -nE '^(prefix|libdir)' {} \;
-
-  里面的 prefix 必须是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7
-
-  不能再出现 /home/jiongming：
-
-  grep -R '/home/jiongming' \
-    "$PREFIX/lib/pkgconfig" \
-    "$PREFIX/lib64/pkgconfig" \
-    2>/dev/null
-
-  这条命令应当没有输出。
-
-  最后检查静态库：
-
-  file "$PREFIX"/lib*/libbitwuzla.a
-  ar t "$PREFIX"/lib*/libbitwuzla.a | head
-
-  如果第 4 步提示要从网络下载 subproject，请立即停止，把错误中的项目名称告诉我；这说明某个 Bitwuzla 子依赖只有 .wrap 描述而没
-  有完整离线源码，需要另行补充。
+  确认 Meson 能显示版本后，就可以继续配置和编译 Bitwuzla。
