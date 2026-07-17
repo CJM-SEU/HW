@@ -1,20 +1,13 @@
-所以当前应先原生编译 GMP，再继续 Bitwuzla；Boost 可以等 Bitwuzla 完成后处理。
+这个错误是因为仓库中的 deps/gmp-6.3.0 同时包含了原机器遗留的 .lo、.o、.libs 等编译产物。复制源码时这些旧对象也被复制到了 /
+  tmp，CentOS 的 libtool 无法识别原机器生成的 fib_table.lo。
 
-  ## 1. 设置环境
+  不需要处理 Boost。只清理 /tmp 中的 GMP 副本并重新构建即可，不会影响仓库原文件。
+
+  ## 1. 重新创建干净的 GMP 源码副本
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
   export JOBS=$(nproc)
-
-  export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
-  export CPATH="$PREFIX/include:${CPATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-  ## 2. 从全新目录编译 GMP
-
-  不要复用仓库内已有的 GMP 构建结果：
 
   rm -rf /tmp/cwx-gmp-6.3.0-src
   rm -rf /tmp/cwx-gmp-6.3.0-build
@@ -22,20 +15,37 @@
   mkdir -p /tmp/cwx-gmp-6.3.0-src
   mkdir -p /tmp/cwx-gmp-6.3.0-build
 
-  复制源码：
-
   cp -a \
     "$ROOT/deps/gmp-6.3.0/." \
     /tmp/cwx-gmp-6.3.0-src/
 
-  清理从原机器复制来的配置文件：
+  ## 2. 删除原机器的构建产物
+
+  以下操作只针对 /tmp 副本：
 
   cd /tmp/cwx-gmp-6.3.0-src
 
-  rm -f config.status config.cache config.log
+  find . -type f \( \
+    -name '*.lo' -o \
+    -name '*.o' -o \
+    -name '*.la' -o \
+    -name '*.a' -o \
+    -name '*.so' -o \
+    -name '*.so.*' \
+  \) -delete
+
+  find . -type d -name '.libs' -prune -exec rm -rf {} +
+
+  rm -f config.status config.cache config.log libtool
   find . -name config.cache -delete
 
-  配置：
+  确认不再存在 fib_table.lo：
+
+  find /tmp/cwx-gmp-6.3.0-src -name 'fib_table.lo'
+
+  这条命令应没有输出。
+
+  ## 3. 重新配置
 
   cd /tmp/cwx-gmp-6.3.0-build
 
@@ -47,121 +57,33 @@
     --enable-shared \
     --with-pic
 
-  编译并安装：
+  配置完成后确认新的 libtool 已生成：
 
-  make -j"$JOBS"
+  ls -l /tmp/cwx-gmp-6.3.0-build/libtool
+
+  ## 4. 先单线程构建
+
+  为了避免并行任务掩盖第一处错误：
+
+  cd /tmp/cwx-gmp-6.3.0-build
+  make -j1
+
+  成功后安装：
+
   make install
 
-  ## 3. 验证 GMP
+  ## 5. 验证
 
   find "$PREFIX" \
     \( -name 'gmp.h' -o \
        -name 'libgmp.a' -o \
-       -name 'libgmp.so*' -o \
-       -name 'gmp.pc' \) \
+       -name 'libgmp.so*' \) \
     -print
 
-  至少应存在：
+  至少应看到：
 
   .local-centos7/include/gmp.h
   .local-centos7/lib/libgmp.a
 
-  测试头文件和库：
-
-  cat >/tmp/test-gmp.c <<'EOF'
-  #include <gmp.h>
-  #include <stdio.h>
-
-  int main(void)
-  {
-      printf("%s\n", gmp_version);
-      return 0;
-  }
-  EOF
-
-  gcc /tmp/test-gmp.c \
-    -I"$PREFIX/include" \
-    -L"$PREFIX/lib" \
-    -Wl,-rpath,"$PREFIX/lib" \
-    -lgmp \
-    -o /tmp/test-gmp
-
-  /tmp/test-gmp
-
-  应该输出类似：
-
-  6.3.0
-
-  ## 4. 确保 Meson 能找到 GMP
-
-  先检查 pkg-config：
-
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
-
-  pkg-config --modversion gmp
-  pkg-config --cflags gmp
-  pkg-config --libs gmp
-
-  如果 pkg-config --modversion gmp 仍提示找不到，但 GMP 测试程序成功，可以手动创建 gmp.pc：
-
-  mkdir -p "$PREFIX/lib/pkgconfig"
-
-  cat > "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
-  prefix=$PREFIX
-  exec_prefix=\${prefix}
-  libdir=\${prefix}/lib
-  includedir=\${prefix}/include
-
-  Name: GNU MP
-  Description: GNU Multiple Precision Arithmetic Library
-  Version: 6.3.0
-  Libs: -L\${libdir} -lgmp
-  Cflags: -I\${includedir}
-  EOF
-
-  重新验证：
-
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
-
-  pkg-config --modversion gmp
-  pkg-config --cflags gmp
-  pkg-config --libs gmp
-
-  ## 5. 重新配置 Bitwuzla
-
-  之前失败的构建目录中缓存了“GMP 不存在”，必须删除：
-
-  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
-  export MESON_SRC=$ROOT/packages/meson-0.64.1
-
-  rm -rf "$ROOT/host-build/bitwuzla"
-
-  重新配置：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" setup \
-    "$ROOT/host-build/bitwuzla" \
-    "$ROOT/deps/smt-switch/deps/bitwuzla" \
-    --prefix="$PREFIX" \
-    --buildtype=release \
-    --default-library=static \
-    -Dtesting=disabled \
-    -Dunit_testing=disabled \
-    -Dpython=false \
-    -Ddocs=false
-
-  然后：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" compile \
-    -C "$ROOT/host-build/bitwuzla" \
-    -j 1
-
-  编译成功后安装：
-
-  "$PYTHON38" "$MESON_SRC/meson.py" install \
-    -C "$ROOT/host-build/bitwuzla"
-
-  当前正确顺序是：
-
-  GMP → Bitwuzla → Boost → smt-switch → FORWORD
-
-  gflags 已经成功编译的话暂时不用再处理。
+  如果仍出现某个 .lo is not a valid libtool object，说明仓库内的 GMP 源码目录混入构建产物过多。那时最稳妥的方案是把官方 gmp-
+  6.3.0.tar.xz 加入 CJM-SEU/baobao，在 CentOS 直接从官方干净源码包解压构建。
