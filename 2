@@ -1,11 +1,25 @@
-./abc -b -c "read_aiger caseA.aig; bmc3 -F 24"
+  cd /path/to/FORWORD-HW
 
-./abc -b -c "read_aiger caseA.aig; &st; &put; bmc3 -F 24"
+  uname -a
+  cat /etc/centos-release
 
-./abc -b -c "read_aiger caseA.aig; &st; &put; bmc3 -a"
+  gcc --version
+  g++ --version
+  cmake --version
+  make --version
+  python3 --version 2>&1
+  pkg-config --version 2>&1
 
-./abc -b -c "read_aiger caseA.aig; write_aiger caseA.rt.aig"
-head -n 1 caseA.aig
-head -n 1 caseA.rt.aig
-./abc -b -c "read_aiger caseA.rt.aig; bmc3 -F 24"
-./abc -b -c "read_aiger caseA.rt.aig; &st; &put; bmc3 -a"
+  which gcc g++ cmake make python3 pkg-config
+  which module 2>/dev/null
+  module avail 2>&1 | head -100
+
+  rpm -q boost-devel gmp-devel gflags-devel flex bison
+  2>/dev/null
+
+  find deps -maxdepth 3 -type f \( \
+    -name 'libgmp.a' -o \
+    -name 'libglog.a' -o \
+    -name 'libsmt-switch.a' -o \
+    -name 'libbtor2parser.a' \
+  \) -print
