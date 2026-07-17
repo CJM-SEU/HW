@@ -1,25 +1,21 @@
-  cd /path/to/FORWORD-HW
+在 CentOS 7 上的操作
 
-  uname -a
-  cat /etc/centos-release
+  重新下载 GitHub ZIP 并解压后：
 
-  gcc --version
-  g++ --version
-  cmake --version
-  make --version
-  python3 --version 2>&1
-  pkg-config --version 2>&1
+  cd /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
 
-  which gcc g++ cmake make python3 pkg-config
-  which module 2>/dev/null
-  module avail 2>&1 | head -100
+  合并 Boost：
 
-  rpm -q boost-devel gmp-devel gflags-devel flex bison
-  2>/dev/null
+  cat packages/boost_1_82_0.tar.gz.part-* \
+    > packages/boost_1_82_0.tar.gz
 
-  find deps -maxdepth 3 -type f \( \
-    -name 'libgmp.a' -o \
-    -name 'libglog.a' -o \
-    -name 'libsmt-switch.a' -o \
-    -name 'libbtor2parser.a' \
-  \) -print
+  校验两个压缩包：
+
+  sha256sum \
+    packages/boost_1_82_0.tar.gz \
+    packages/gflags-2.2.2.tar.gz
+
+  预期结果：
+
+  66a469b6e608a51f8347236f4912e27dc5c60c60d7d53ae9bfe4683316c6f04c  packages/boost_1_82_0.tar.gz
+  34af2f15cf7367513b352bdcd2493ab14ce43692d2dcd9dfc499492966c64dcf  packages/gflags-2.2.2.tar.gz
