@@ -1,96 +1,173 @@
-这是 CentOS 7 缺少系统静态 glibc 库导致的，并不是 GMP 或 Bitwuzla 源码错误。
+如何验证linux上bitwuzla已经就绪？以及接下来做什么？
 
-  Bitwuzla 在 --default-library=static 模式下，会给最终命令行程序添加：
 
-  -static
+• 可以从文件、pkg-config、运行时依赖和求解功能四层验证 Bitwuzla。
 
-  于是链接器要求系统提供静态版本的：
-
-  - libm.a
-  - libpthread.a
-  - librt.a（你看到的最后一个可能是 -lrt）
-
-  这些通常由 glibc-static 提供，但你没有 sudo，无法安装系统包。
-
-  FORWORD 只要求 Bitwuzla 静态库，不要求 bitwuzla 命令行程序自身完全静态。因此，应保留 libbitwuzla.a，但取消命令行程序的
-  -static。
-
-  ## 1. 修改 Bitwuzla 的命令行程序配置
+  ## 1. 设置环境
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-
-  cd "$ROOT/deps/smt-switch/deps/bitwuzla/src/main"
-
-  cp meson.build meson.build.before-centos7
-
-  把添加 -static 的行注释掉：
-
-  sed -i \
-    "s/^[[:space:]]*link_args += \\['-static'\\]/  # Disabled: CentOS host has no glibc-static/" \
-    meson.build
-
-  检查结果：
-
-  grep -n -A3 -B3 'glibc-static\|-static' meson.build
-
-  应看到类似：
-
-  if build_static and host_machine.system() != 'darwin'
-    # Disabled: CentOS host has no glibc-static
-  endif
-
-  ## 2. 重新配置
-
-  为了避免旧链接参数继续留在 Ninja 文件中，清空构建目录：
-
   export PREFIX=$ROOT/.local-centos7
-  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
-  export MESON_SRC=$ROOT/packages/meson-0.64.1
 
   export PATH="$PREFIX/bin:$PATH"
   export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
-  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:$PREFIX/lib/x86_64-linux-gnu/pkgconfig:
+  ${PKG_CONFIG_PATH:-}"
 
-  rm -rf "$ROOT/host-build/bitwuzla"
+  ## 2. 检查安装文件
 
-  重新配置，仍保留静态库模式：
+  find "$PREFIX" \
+    \( -name 'libbitwuzla*.a' -o \
+       -name 'bitwuzla.pc' -o \
+       -path '*/bin/bitwuzla' \) \
+    -print
 
-  "$PYTHON38" "$MESON_SRC/meson.py" setup \
-    "$ROOT/host-build/bitwuzla" \
-    "$ROOT/deps/smt-switch/deps/bitwuzla" \
-    --prefix="$PREFIX" \
-    --buildtype=release \
-    --default-library=static \
-    -Dtesting=disabled \
-    -Dunit_testing=disabled \
-    -Dpython=false \
-    -Ddocs=false
+  至少应找到：
 
-  ## 3. 重新编译
+  - libbitwuzla.a
+  - bitwuzla.pc
+  - 最好还有 bin/bitwuzla
 
-  "$PYTHON38" "$MESON_SRC/meson.py" compile \
-    -C "$ROOT/host-build/bitwuzla" \
-    -j 1
+  检查静态库：
 
-  现在最终链接命令中不应再出现独立的：
+  BITWUZLA_LIB=$(find "$PREFIX" -name libbitwuzla.a | head -1)
 
-  -static
+  file "$BITWUZLA_LIB"
+  ar t "$BITWUZLA_LIB" | head
 
-  -lm、-lpthread 和 -lrt 会改为链接系统动态库。
+  file 应显示：
 
-  ## 4. 安装
+  current ar archive
 
-  "$PYTHON38" "$MESON_SRC/meson.py" install \
-    -C "$ROOT/host-build/bitwuzla"
+  ## 3. 检查 pkg-config
 
-  验证静态库：
+  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
+  export PKG_CONFIG_PATH="$(dirname "$BITWUZLA_PC"):$PKG_CONFIG_PATH"
 
-  find "$PREFIX" -name 'libbitwuzla*.a' -print
-  find "$PREFIX" -name 'bitwuzla.pc' -print
+  pkg-config --modversion bitwuzla
+  pkg-config --cflags bitwuzla
+  pkg-config --libs bitwuzla
+  pkg-config --libs --static bitwuzla
 
-  验证命令行程序：
+  版本应类似：
+
+  0.7.0-dev
+
+  检查是否残留本地旧路径：
+
+  grep -R '/home/jiongming' \
+    "$PREFIX/lib" \
+    "$PREFIX/lib64" \
+    2>/dev/null
+
+  这条命令应没有输出。
+
+  ## 4. 检查命令行程序
 
   "$PREFIX/bin/bitwuzla" --version
   ldd "$PREFIX/bin/bitwuzla"
 
-  ldd 显示动态依赖是正常的。我们需要的是 Bitwuzla 库保持静态，并不要求它的命令行程序完全静态。
+  ldd 输出中不能出现：
+
+  not found
+
+  如果没有生成 $PREFIX/bin/bitwuzla，但静态库存在，仍可以供 FORWORD 使用，不过建议先确认安装步骤确实执行成功。
+
+  ## 5. 做一个真实求解测试
+
+  创建测试文件：
+
+  cat >/tmp/test-bitwuzla.smt2 <<'EOF'
+  (set-logic QF_BV)
+  (declare-fun x () (_ BitVec 8))
+  (assert (= x #x2a))
+  (check-sat)
+  (exit)
+  EOF
+
+  运行：
+
+  "$PREFIX/bin/bitwuzla" /tmp/test-bitwuzla.smt2
+
+  预期输出包含：
+
+  sat
+
+  再测试不可满足问题：
+
+  cat >/tmp/test-bitwuzla-unsat.smt2 <<'EOF'
+  (set-logic QF_BV)
+  (declare-fun x () (_ BitVec 8))
+  (assert (= x #x01))
+  (assert (= x #x02))
+  (check-sat)
+  (exit)
+  EOF
+
+  "$PREFIX/bin/bitwuzla" /tmp/test-bitwuzla-unsat.smt2
+
+  预期：
+
+  unsat
+
+  如果上述检查全部通过，Bitwuzla 就已经就绪。
+
+  ## 后续构建顺序
+
+  接下来建议按以下顺序：
+
+  Boost
+    ↓
+  glog 和 btor2tools
+    ↓
+  smt-switch
+    ↓
+  FORWORD
+
+  gflags 已经完成，不需要重做。
+
+  ## 下一步：构建 Boost
+
+  仓库现在包含解压后的 Boost 源码：
+
+  export JOBS=$(nproc)
+
+  cd "$ROOT/packages/boost_1_82_0"
+
+  清除之前可能失败的 Boost.Build 状态：
+
+  rm -rf bin.v2
+  rm -f project-config.jam
+
+  重新生成 b2：
+
+  ./bootstrap.sh \
+    --with-toolset=gcc \
+    --prefix="$PREFIX"
+
+  确认 b2 能运行：
+
+  ./b2 --version
+
+  编译 FORWORD 需要的两个库：
+
+  ./b2 -j1 \
+    --with-system \
+    --with-filesystem \
+    toolset=gcc \
+    link=static \
+    runtime-link=shared \
+    threading=multi \
+    variant=release \
+    cxxflags="-O2 -fPIC" \
+    install
+
+  成功后验证：
+
+  find "$PREFIX" \
+    \( -name 'libboost_system.a' -o \
+       -name 'libboost_filesystem.a' \) \
+    -print
+
+  ls "$PREFIX/include/boost/version.hpp"
+
+  如果 Boost 再次失败，请使用 -j1 输出中的第一条 error: 作为排查起点。Boost 完成后，下一步是重新编译 glog 和 btor2tools。
