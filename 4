@@ -1,61 +1,88 @@
-原因很明确：之前配置时启用了：
+## 在 CentOS 上检查
 
-  -DGFLAGS_BUILD_PACKAGING=ON
+  执行：
 
-  这会启用 CPack 安装包生成，但 GitHub 源码压缩包中缺少 doc/index.html，导致 CPack 配置失败。FORWORD 只需要 gflags 的头文件和
-  静态库，不需要生成安装包，因此关闭 packaging 即可。
+  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
 
-  先删除失败的 gflags 构建目录：
+  cd "$ROOT"
+
+  stat deps/smt-switch/deps/bitwuzla/build/src/libbitwuzla.a
+
+  stat \
+    deps/smt-switch/deps/install/lib/x86_64-linux-gnu/libbitwuzla.a
+
+  grep -nE '^(prefix|libdir)|home/jiongming' \
+    deps/smt-switch/deps/install/lib/pkgconfig/bitwuzla.pc
+
+  如果时间仍是仓库复制时的时间，或者 pkg-config 中仍出现 /home/jiongming，说明 CentOS 没有完成原生安装。
+
+  ## 真正重新编译 Bitwuzla 的前提
+
+  Bitwuzla 使用 Meson 和 Ninja。先检查：
+
+  meson --version
+  ninja --version
+
+  如果出现 command not found，CentOS 当前还不能重新编译 Bitwuzla。由于机器不能联网，需要在可联网机器上额外准备 Meson/Ninja 的
+  离线安装包。
+
+  Python 3.6 对新版 Meson 支持有限，不能随意使用最新版。先把上述两条命令输出告诉我；如果 Meson/Ninja 已存在，再按下面步骤构
+  建。
+
+  ## CentOS 原生重编 Bitwuzla
+
+  不要覆盖仓库携带的构建结果，使用新目录：
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
   export JOBS=$(nproc)
 
-  rm -rf "$ROOT/host-build/gflags"
+  export PATH="$PREFIX/bin:$PATH"
+  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-  重新配置：
+  cd "$ROOT/deps/smt-switch/deps/bitwuzla"
 
-  cmake \
-    -S "$ROOT/packages/gflags-2.2.2" \
-    -B "$ROOT/host-build/gflags" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DBUILD_STATIC_LIBS=ON \
-    -DBUILD_TESTING=OFF \
-    -DGFLAGS_BUILD_TESTING=OFF \
-    -DGFLAGS_BUILD_PACKAGING=OFF \
-    -DGFLAGS_BUILD_gflags_LIB=ON \
-    -DGFLAGS_BUILD_gflags_nothreads_LIB=OFF \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+  ./configure.py release \
+    --build-dir="$ROOT/host-build/bitwuzla" \
+    --prefix="$PREFIX" \
+    --static \
+    --no-testing \
+    --no-unit-testing \
+    --no-python \
+    --no-docs
 
-  如果配置末尾没有报错，编译并安装：
+  编译：
 
-  cmake --build "$ROOT/host-build/gflags" -j"$JOBS"
-  cmake --install "$ROOT/host-build/gflags"
+  meson compile \
+    -C "$ROOT/host-build/bitwuzla" \
+    -j "$JOBS"
 
-  验证结果：
+  安装：
+
+  meson install \
+    -C "$ROOT/host-build/bitwuzla"
+
+  ## 验证是否真的由 CentOS 编译
 
   find "$PREFIX" \
-    \( -name 'libgflags.a' -o \
-       -name 'gflags-config.cmake' -o \
-       -name 'gflagsConfig.cmake' \) \
+    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
     -print
 
-  ls -l "$PREFIX/include/gflags/gflags.h"
+  grep -nE '^(prefix|libdir)' \
+    "$PREFIX/lib64/pkgconfig/bitwuzla.pc" \
+    "$PREFIX/lib/pkgconfig/bitwuzla.pc" \
+    2>/dev/null
 
-  还可以让 CMake 验证配置包：
+  再检查静态库：
 
-  find "$PREFIX" -path '*cmake/gflags*' -type f -print
+  file "$PREFIX"/lib*/libbitwuzla.a
+  ar t "$PREFIX"/lib*/libbitwuzla.a | head
 
-  预期至少能找到：
+  只有以下条件都满足，才算 CentOS 上完成了 Bitwuzla 原生构建：
 
-  .local-centos7/lib/libgflags.a
-  .local-centos7/include/gflags/gflags.h
-  .local-centos7/lib/cmake/gflags/gflags-config.cmake
-
-  如果仍然触发 CPack，可以额外加入：
-
-  -DCPACK_GENERATOR=""
-
-  不过正常情况下 -DGFLAGS_BUILD_PACKAGING=OFF 就足够。
+  - meson compile 成功结束；
+  - meson install 成功结束；
+  - .local-centos7 中生成 libbitwuzla.a；
+  - 新 bitwuzla.pc 的 prefix 指向 /hongfeng/cwx1485722/.../.local-centos7；
+  - 配置文件中不再出现 /home/jiongming。
