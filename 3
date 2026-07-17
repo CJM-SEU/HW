@@ -1,43 +1,142 @@
-很好，Python、libffi、Meson 和 Ninja 这条工具链已经打通。现在原生编译 Bitwuzla。
+所以当前应先原生编译 GMP，再继续 Bitwuzla；Boost 可以等 Bitwuzla 完成后处理。
 
   ## 1. 设置环境
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
-  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
-  export MESON_SRC=$ROOT/packages/meson-0.64.1
   export JOBS=$(nproc)
 
   export PATH="$PREFIX/bin:$PATH"
-  export LD_LIBRARY_PATH="$ROOT/.local-centos7/libffi/lib:$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
   export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
   export CPATH="$PREFIX/include:${CPATH:-}"
   export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-  确认工具：
+  ## 2. 从全新目录编译 GMP
 
-  gcc --version | head -1
-  g++ --version | head -1
-  ninja --version
-  "$PYTHON38" "$MESON_SRC/meson.py" --version
+  不要复用仓库内已有的 GMP 构建结果：
 
-  ## 2. 检查 Bitwuzla 源码
+  rm -rf /tmp/cwx-gmp-6.3.0-src
+  rm -rf /tmp/cwx-gmp-6.3.0-build
 
-  cd "$ROOT/deps/smt-switch/deps/bitwuzla"
+  mkdir -p /tmp/cwx-gmp-6.3.0-src
+  mkdir -p /tmp/cwx-gmp-6.3.0-build
 
-  test -f meson.build && echo "meson.build OK"
-  test -f src/main/main.cpp && echo "Bitwuzla source OK"
+  复制源码：
 
-  find subprojects -maxdepth 2 -type d | sort | head -50
+  cp -a \
+    "$ROOT/deps/gmp-6.3.0/." \
+    /tmp/cwx-gmp-6.3.0-src/
 
-  ## 3. 全新配置
+  清理从原机器复制来的配置文件：
 
-  不能使用仓库原有的 build/，它来自另一台机器：
+  cd /tmp/cwx-gmp-6.3.0-src
+
+  rm -f config.status config.cache config.log
+  find . -name config.cache -delete
+
+  配置：
+
+  cd /tmp/cwx-gmp-6.3.0-build
+
+  CFLAGS="-O2 -fPIC" \
+  CXXFLAGS="-O2 -fPIC" \
+  /tmp/cwx-gmp-6.3.0-src/configure \
+    --prefix="$PREFIX" \
+    --enable-static \
+    --enable-shared \
+    --with-pic
+
+  编译并安装：
+
+  make -j"$JOBS"
+  make install
+
+  ## 3. 验证 GMP
+
+  find "$PREFIX" \
+    \( -name 'gmp.h' -o \
+       -name 'libgmp.a' -o \
+       -name 'libgmp.so*' -o \
+       -name 'gmp.pc' \) \
+    -print
+
+  至少应存在：
+
+  .local-centos7/include/gmp.h
+  .local-centos7/lib/libgmp.a
+
+  测试头文件和库：
+
+  cat >/tmp/test-gmp.c <<'EOF'
+  #include <gmp.h>
+  #include <stdio.h>
+
+  int main(void)
+  {
+      printf("%s\n", gmp_version);
+      return 0;
+  }
+  EOF
+
+  gcc /tmp/test-gmp.c \
+    -I"$PREFIX/include" \
+    -L"$PREFIX/lib" \
+    -Wl,-rpath,"$PREFIX/lib" \
+    -lgmp \
+    -o /tmp/test-gmp
+
+  /tmp/test-gmp
+
+  应该输出类似：
+
+  6.3.0
+
+  ## 4. 确保 Meson 能找到 GMP
+
+  先检查 pkg-config：
+
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+  pkg-config --modversion gmp
+  pkg-config --cflags gmp
+  pkg-config --libs gmp
+
+  如果 pkg-config --modversion gmp 仍提示找不到，但 GMP 测试程序成功，可以手动创建 gmp.pc：
+
+  mkdir -p "$PREFIX/lib/pkgconfig"
+
+  cat > "$PREFIX/lib/pkgconfig/gmp.pc" <<EOF
+  prefix=$PREFIX
+  exec_prefix=\${prefix}
+  libdir=\${prefix}/lib
+  includedir=\${prefix}/include
+
+  Name: GNU MP
+  Description: GNU Multiple Precision Arithmetic Library
+  Version: 6.3.0
+  Libs: -L\${libdir} -lgmp
+  Cflags: -I\${includedir}
+  EOF
+
+  重新验证：
+
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+  pkg-config --modversion gmp
+  pkg-config --cflags gmp
+  pkg-config --libs gmp
+
+  ## 5. 重新配置 Bitwuzla
+
+  之前失败的构建目录中缓存了“GMP 不存在”，必须删除：
+
+  export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
+  export MESON_SRC=$ROOT/packages/meson-0.64.1
 
   rm -rf "$ROOT/host-build/bitwuzla"
-  mkdir -p "$ROOT/host-build"
 
-  执行配置：
+  重新配置：
 
   "$PYTHON38" "$MESON_SRC/meson.py" setup \
     "$ROOT/host-build/bitwuzla" \
@@ -50,88 +149,19 @@
     -Dpython=false \
     -Ddocs=false
 
-  注意观察输出。如果出现以下内容，请停止：
-
-  Downloading...
-  Could not resolve host...
-  Subproject ... is buildable: NO
-
-  这意味着某个子依赖源码没有完整上传。
-
-  ## 4. 编译
-
-  第一次使用单线程，以便清楚看到错误：
+  然后：
 
   "$PYTHON38" "$MESON_SRC/meson.py" compile \
     -C "$ROOT/host-build/bitwuzla" \
     -j 1
 
-  如果成功，末尾应接近：
-
-  ninja: no work to do
-
-  或者所有 target 均完成。
-
-  ## 5. 安装
+  编译成功后安装：
 
   "$PYTHON38" "$MESON_SRC/meson.py" install \
     -C "$ROOT/host-build/bitwuzla"
 
-  ## 6. 验证安装
+  当前正确顺序是：
 
-  寻找库和 pkg-config 文件：
+  GMP → Bitwuzla → Boost → smt-switch → FORWORD
 
-  find "$PREFIX" \
-    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
-    -print
-
-  正常应包含：
-
-  .local-centos7/lib64/libbitwuzla.a
-
-  或：
-
-  .local-centos7/lib/x86_64-linux-gnu/libbitwuzla.a
-
-  检查静态库：
-
-  BITWUZLA_LIB=$(find "$PREFIX" -name libbitwuzla.a | head -1)
-
-  file "$BITWUZLA_LIB"
-  ar t "$BITWUZLA_LIB" | head
-
-  检查配置文件路径：
-
-  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
-
-  echo "$BITWUZLA_PC"
-  grep -nE '^(prefix|libdir|includedir)' "$BITWUZLA_PC"
-
-  prefix 必须是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7
-
-  确认不含本机旧路径：
-
-  grep -R '/home/jiongming' \
-    "$PREFIX/lib/pkgconfig" \
-    "$PREFIX/lib64/pkgconfig" \
-    "$PREFIX/lib/x86_64-linux-gnu/pkgconfig" \
-    2>/dev/null
-
-  这条命令应没有输出。
-
-  ## 7. 让 pkg-config 找到 Bitwuzla
-
-  BITWUZLA_PC_DIR=$(dirname "$BITWUZLA_PC")
-  export PKG_CONFIG_PATH="$BITWUZLA_PC_DIR:$PKG_CONFIG_PATH"
-
-  pkg-config --modversion bitwuzla
-  pkg-config --cflags bitwuzla
-  pkg-config --libs bitwuzla
-
-  如果配置或编译失败，只需告诉我：
-
-  - 失败发生在 meson setup 还是 meson compile；
-  - 第一条 ERROR: 或 error: 的内容；
-  - 如果缺少 subproject，告诉我其名称。
+  gflags 已经成功编译的话暂时不用再处理。
