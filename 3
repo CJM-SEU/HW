@@ -1,136 +1,137 @@
-问题是 Python 构建时缺少 libffi，导致 _ctypes 没有生成。libffi 3.4.4 已上传至：
+很好，Python、libffi、Meson 和 Ninja 这条工具链已经打通。现在原生编译 Bitwuzla。
 
-  CJM-SEU/baobao (https://github.com/CJM-SEU/baobao)
-
-  最新提交：8557dae
-
-  你只需把 libffi-3.4.4.tar.gz 复制到 CentOS 的：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/packages/
-
-  ## 1. 编译安装 libffi
+  ## 1. 设置环境
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export FFI_PREFIX=$ROOT/.local-centos7/libffi
-  export JOBS=$(nproc)
-
-  rm -rf /tmp/cwx-libffi-3.4.4-src
-  rm -rf /tmp/cwx-libffi-3.4.4-build
-
-  mkdir -p /tmp/cwx-libffi-3.4.4-src
-  mkdir -p /tmp/cwx-libffi-3.4.4-build
-
-  校验压缩包：
-
-  sha256sum "$ROOT/packages/libffi-3.4.4.tar.gz"
-
-  预期：
-
-  d66c56ad259a82cf2a9dfc408b32bf5da52371500b84745f7fb8b645712df676
-
-  解压：
-
-  tar -xzf "$ROOT/packages/libffi-3.4.4.tar.gz" \
-    -C /tmp/cwx-libffi-3.4.4-src \
-    --strip-components=1
-
-  配置：
-
-  cd /tmp/cwx-libffi-3.4.4-build
-
-  CFLAGS="-O2 -fPIC" \
-  /tmp/cwx-libffi-3.4.4-src/configure \
-    --prefix="$FFI_PREFIX"
-
-  编译安装：
-
-  make -j"$JOBS"
-  make install
-
-  验证：
-
-  find "$FFI_PREFIX" \
-    \( -name 'ffi.h' -o -name 'libffi.so*' -o -name 'libffi.a' -o -name 'libffi.pc' \) \
-    -print
-
-  ## 2. 使用 libffi 重新构建 Python
-
-  旧 Python 安装可以直接覆盖，但构建目录必须全新创建：
-
-  export PYTHON_PREFIX=/hongfeng/cwx1485722/python38
-  export PYTHON_ARCHIVE=$ROOT/packages/Python-3.8.18.tgz
-
-  rm -rf /tmp/cwx-python-3.8.18-src
-  rm -rf /tmp/cwx-python-3.8.18-build
-
-  mkdir -p /tmp/cwx-python-3.8.18-src
-  mkdir -p /tmp/cwx-python-3.8.18-build
-
-  tar -xzf "$PYTHON_ARCHIVE" \
-    -C /tmp/cwx-python-3.8.18-src \
-    --strip-components=1
-
-  设置 libffi 环境：
-
-  export PKG_CONFIG_PATH="$FFI_PREFIX/lib/pkgconfig:$FFI_PREFIX/lib64/pkgconfig"
-  export LD_LIBRARY_PATH="$FFI_PREFIX/lib:$FFI_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
-
-  export LIBFFI_CFLAGS="$(pkg-config --cflags libffi)"
-  export LIBFFI_LIBS="$(pkg-config --libs libffi)"
-
-  pkg-config --modversion libffi
-  pkg-config --cflags libffi
-  pkg-config --libs libffi
-
-  重新配置 Python：
-
-  cd /tmp/cwx-python-3.8.18-build
-
-  unset CONFIG_SITE PYTHONHOME PYTHONPATH PROFILE_TASK MAKEFLAGS MFLAGS
-
-  CPPFLAGS="$LIBFFI_CFLAGS" \
-  LDFLAGS="-L$FFI_PREFIX/lib -L$FFI_PREFIX/lib64 -Wl,-rpath,$FFI_PREFIX/lib -Wl,-rpath,$FFI_PREFIX/lib64" \
-  LIBFFI_CFLAGS="$LIBFFI_CFLAGS" \
-  LIBFFI_LIBS="$LIBFFI_LIBS" \
-  /tmp/cwx-python-3.8.18-src/configure \
-    --prefix="$PYTHON_PREFIX" \
-    --without-ensurepip \
-    --with-system-ffi
-
-  编译并覆盖安装：
-
-  make -j"$JOBS"
-  make install
-
-  ## 3. 验证 _ctypes
-
-  export LD_LIBRARY_PATH="$FFI_PREFIX/lib:$FFI_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
-
-  /hongfeng/cwx1485722/python38/bin/python3.8 -c \
-  'import ctypes; print("ctypes OK:", ctypes.__file__)'
-
-  如果成功，会输出类似：
-
-  ctypes OK: /hongfeng/cwx1485722/python38/lib/python3.8/ctypes/__init__.py
-
-  进一步确认底层模块：
-
-  /hongfeng/cwx1485722/python38/bin/python3.8 -c \
-  'import _ctypes; print("_ctypes OK:", _ctypes.__file__)'
-
-  ## 4. 再次运行 Meson
-
+  export PREFIX=$ROOT/.local-centos7
   export PYTHON38=/hongfeng/cwx1485722/python38/bin/python3.8
   export MESON_SRC=$ROOT/packages/meson-0.64.1
+  export JOBS=$(nproc)
 
-  cd "$ROOT/packages"
+  export PATH="$PREFIX/bin:$PATH"
+  export LD_LIBRARY_PATH="$ROOT/.local-centos7/libffi/lib:$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
+  export LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LIBRARY_PATH:-}"
+  export CPATH="$PREFIX/include:${CPATH:-}"
+  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-  test -d meson-0.64.1 || tar -xzf meson-0.64.1.tar.gz
+  确认工具：
 
+  gcc --version | head -1
+  g++ --version | head -1
+  ninja --version
   "$PYTHON38" "$MESON_SRC/meson.py" --version
 
-  预期：
+  ## 2. 检查 Bitwuzla 源码
 
-  0.64.1
+  cd "$ROOT/deps/smt-switch/deps/bitwuzla"
 
-  确认 Meson 能显示版本后，就可以继续配置和编译 Bitwuzla。
+  test -f meson.build && echo "meson.build OK"
+  test -f src/main/main.cpp && echo "Bitwuzla source OK"
+
+  find subprojects -maxdepth 2 -type d | sort | head -50
+
+  ## 3. 全新配置
+
+  不能使用仓库原有的 build/，它来自另一台机器：
+
+  rm -rf "$ROOT/host-build/bitwuzla"
+  mkdir -p "$ROOT/host-build"
+
+  执行配置：
+
+  "$PYTHON38" "$MESON_SRC/meson.py" setup \
+    "$ROOT/host-build/bitwuzla" \
+    "$ROOT/deps/smt-switch/deps/bitwuzla" \
+    --prefix="$PREFIX" \
+    --buildtype=release \
+    --default-library=static \
+    -Dtesting=disabled \
+    -Dunit_testing=disabled \
+    -Dpython=false \
+    -Ddocs=false
+
+  注意观察输出。如果出现以下内容，请停止：
+
+  Downloading...
+  Could not resolve host...
+  Subproject ... is buildable: NO
+
+  这意味着某个子依赖源码没有完整上传。
+
+  ## 4. 编译
+
+  第一次使用单线程，以便清楚看到错误：
+
+  "$PYTHON38" "$MESON_SRC/meson.py" compile \
+    -C "$ROOT/host-build/bitwuzla" \
+    -j 1
+
+  如果成功，末尾应接近：
+
+  ninja: no work to do
+
+  或者所有 target 均完成。
+
+  ## 5. 安装
+
+  "$PYTHON38" "$MESON_SRC/meson.py" install \
+    -C "$ROOT/host-build/bitwuzla"
+
+  ## 6. 验证安装
+
+  寻找库和 pkg-config 文件：
+
+  find "$PREFIX" \
+    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
+    -print
+
+  正常应包含：
+
+  .local-centos7/lib64/libbitwuzla.a
+
+  或：
+
+  .local-centos7/lib/x86_64-linux-gnu/libbitwuzla.a
+
+  检查静态库：
+
+  BITWUZLA_LIB=$(find "$PREFIX" -name libbitwuzla.a | head -1)
+
+  file "$BITWUZLA_LIB"
+  ar t "$BITWUZLA_LIB" | head
+
+  检查配置文件路径：
+
+  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
+
+  echo "$BITWUZLA_PC"
+  grep -nE '^(prefix|libdir|includedir)' "$BITWUZLA_PC"
+
+  prefix 必须是：
+
+  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7
+
+  确认不含本机旧路径：
+
+  grep -R '/home/jiongming' \
+    "$PREFIX/lib/pkgconfig" \
+    "$PREFIX/lib64/pkgconfig" \
+    "$PREFIX/lib/x86_64-linux-gnu/pkgconfig" \
+    2>/dev/null
+
+  这条命令应没有输出。
+
+  ## 7. 让 pkg-config 找到 Bitwuzla
+
+  BITWUZLA_PC_DIR=$(dirname "$BITWUZLA_PC")
+  export PKG_CONFIG_PATH="$BITWUZLA_PC_DIR:$PKG_CONFIG_PATH"
+
+  pkg-config --modversion bitwuzla
+  pkg-config --cflags bitwuzla
+  pkg-config --libs bitwuzla
+
+  如果配置或编译失败，只需告诉我：
+
+  - 失败发生在 meson setup 还是 meson compile；
+  - 第一条 ERROR: 或 error: 的内容；
+  - 如果缺少 subproject，告诉我其名称。
