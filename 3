@@ -1,173 +1,159 @@
-如何验证linux上bitwuzla已经就绪？以及接下来做什么？
+如果 Bitwuzla 和 Boost 都已通过验证，下一步重新编译 glog 和 btor2tools。不要使用仓库里从原机器复制的静态库。
 
-
-• 可以从文件、pkg-config、运行时依赖和求解功能四层验证 Bitwuzla。
-
-  ## 1. 设置环境
+  先确认前置依赖：
 
   export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
   export PREFIX=$ROOT/.local-centos7
+  export JOBS=$(nproc)
 
   export PATH="$PREFIX/bin:$PATH"
   export LD_LIBRARY_PATH="$PREFIX/lib64:$PREFIX/lib:${LD_LIBRARY_PATH:-}"
   export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig:$PREFIX/lib/x86_64-linux-gnu/pkgconfig:
   ${PKG_CONFIG_PATH:-}"
 
-  ## 2. 检查安装文件
-
   find "$PREFIX" \
-    \( -name 'libbitwuzla*.a' -o \
-       -name 'bitwuzla.pc' -o \
-       -path '*/bin/bitwuzla' \) \
+    \( -name 'libbitwuzla.a' -o \
+       -name 'libboost_system.a' -o \
+       -name 'libboost_filesystem.a' -o \
+       -name 'libgflags.a' \) \
     -print
 
-  至少应找到：
+  如果四个库都能找到，继续。
 
-  - libbitwuzla.a
-  - bitwuzla.pc
-  - 最好还有 bin/bitwuzla
+  ## 1. 原生构建 glog
 
-  检查静态库：
+  建立全新构建目录：
 
-  BITWUZLA_LIB=$(find "$PREFIX" -name libbitwuzla.a | head -1)
+  rm -rf "$ROOT/host-build/glog"
+  rm -rf "$ROOT/deps/glog/install-centos7"
 
-  file "$BITWUZLA_LIB"
-  ar t "$BITWUZLA_LIB" | head
+  配置：
 
-  file 应显示：
+  cmake \
+    -S "$ROOT/deps/glog" \
+    -B "$ROOT/host-build/glog" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$ROOT/deps/glog/install-centos7" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DWITH_GFLAGS=OFF \
+    -DBUILD_TESTING=OFF \
+    -DWITH_GTEST=OFF \
+    -DWITH_UNWIND=OFF \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+  编译并安装：
+
+  cmake --build "$ROOT/host-build/glog" -j1
+  cmake --install "$ROOT/host-build/glog"
+
+  验证：
+
+  find "$ROOT/deps/glog/install-centos7" \
+    \( -name 'libglog.a' -o -name 'logging.h' \) \
+    -print
+
+  ## 2. 让 FORWORD 使用新 glog
+
+  FORWORD 顶层 CMake 固定寻找：
+
+  deps/glog/install/lib/libglog.a
+
+  备份原机器结果：
+
+  cd "$ROOT/deps/glog"
+
+  if [ -d install ] && [ ! -d install-original ]; then
+      mv install install-original
+  fi
+
+  mv install-centos7 install
+
+  检查：
+
+  find "$ROOT/deps/glog/install" \
+    \( -name 'libglog.a' -o -name 'logging.h' \) \
+    -print
+
+  如果库安装在 lib64：
+
+  mkdir -p "$ROOT/deps/glog/install/lib"
+
+  ln -sf ../lib64/libglog.a \
+    "$ROOT/deps/glog/install/lib/libglog.a"
+
+  最终必须存在：
+
+  test -f "$ROOT/deps/glog/install/lib/libglog.a" &&
+  echo "glog ready"
+
+  ## 3. 原生构建 btor2tools
+
+  rm -rf "$ROOT/host-build/btor2tools"
+
+  cmake \
+    -S "$ROOT/deps/btor2tools" \
+    -B "$ROOT/host-build/btor2tools" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+
+  编译：
+
+  cmake --build "$ROOT/host-build/btor2tools" -j1
+
+  寻找结果：
+
+  find "$ROOT/host-build/btor2tools" \
+    -name 'libbtor2parser.a' \
+    -print
+
+  ## 4. 替换 btor2tools 旧构建目录
+
+  FORWORD 固定使用：
+
+  deps/btor2tools/build/lib/libbtor2parser.a
+
+  备份原结果：
+
+  cd "$ROOT/deps/btor2tools"
+
+  if [ -d build ] && [ ! -d build-original ]; then
+      mv build build-original
+  fi
+
+  mv "$ROOT/host-build/btor2tools" build
+
+  验证：
+
+  test -f "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a" &&
+  echo "btor2tools ready"
+
+  如果实际库位置不同，查找：
+
+  find "$ROOT/deps/btor2tools/build" -name 'libbtor2parser.a' -print
+
+  若结果不是 build/lib/libbtor2parser.a，建立目标目录和符号链接：
+
+  BTOR2_LIB=$(find "$ROOT/deps/btor2tools/build" -name libbtor2parser.a | head -1)
+
+  mkdir -p "$ROOT/deps/btor2tools/build/lib"
+
+  ln -sf "$BTOR2_LIB" \
+    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
+
+  ## 5. 汇总检查
+
+  ls -lh \
+    "$ROOT/deps/glog/install/lib/libglog.a" \
+    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
+
+  file \
+    "$ROOT/deps/glog/install/lib/libglog.a" \
+    "$ROOT/deps/btor2tools/build/lib/libbtor2parser.a"
+
+  两者都应显示：
 
   current ar archive
 
-  ## 3. 检查 pkg-config
-
-  BITWUZLA_PC=$(find "$PREFIX" -name bitwuzla.pc | head -1)
-  export PKG_CONFIG_PATH="$(dirname "$BITWUZLA_PC"):$PKG_CONFIG_PATH"
-
-  pkg-config --modversion bitwuzla
-  pkg-config --cflags bitwuzla
-  pkg-config --libs bitwuzla
-  pkg-config --libs --static bitwuzla
-
-  版本应类似：
-
-  0.7.0-dev
-
-  检查是否残留本地旧路径：
-
-  grep -R '/home/jiongming' \
-    "$PREFIX/lib" \
-    "$PREFIX/lib64" \
-    2>/dev/null
-
-  这条命令应没有输出。
-
-  ## 4. 检查命令行程序
-
-  "$PREFIX/bin/bitwuzla" --version
-  ldd "$PREFIX/bin/bitwuzla"
-
-  ldd 输出中不能出现：
-
-  not found
-
-  如果没有生成 $PREFIX/bin/bitwuzla，但静态库存在，仍可以供 FORWORD 使用，不过建议先确认安装步骤确实执行成功。
-
-  ## 5. 做一个真实求解测试
-
-  创建测试文件：
-
-  cat >/tmp/test-bitwuzla.smt2 <<'EOF'
-  (set-logic QF_BV)
-  (declare-fun x () (_ BitVec 8))
-  (assert (= x #x2a))
-  (check-sat)
-  (exit)
-  EOF
-
-  运行：
-
-  "$PREFIX/bin/bitwuzla" /tmp/test-bitwuzla.smt2
-
-  预期输出包含：
-
-  sat
-
-  再测试不可满足问题：
-
-  cat >/tmp/test-bitwuzla-unsat.smt2 <<'EOF'
-  (set-logic QF_BV)
-  (declare-fun x () (_ BitVec 8))
-  (assert (= x #x01))
-  (assert (= x #x02))
-  (check-sat)
-  (exit)
-  EOF
-
-  "$PREFIX/bin/bitwuzla" /tmp/test-bitwuzla-unsat.smt2
-
-  预期：
-
-  unsat
-
-  如果上述检查全部通过，Bitwuzla 就已经就绪。
-
-  ## 后续构建顺序
-
-  接下来建议按以下顺序：
-
-  Boost
-    ↓
-  glog 和 btor2tools
-    ↓
-  smt-switch
-    ↓
-  FORWORD
-
-  gflags 已经完成，不需要重做。
-
-  ## 下一步：构建 Boost
-
-  仓库现在包含解压后的 Boost 源码：
-
-  export JOBS=$(nproc)
-
-  cd "$ROOT/packages/boost_1_82_0"
-
-  清除之前可能失败的 Boost.Build 状态：
-
-  rm -rf bin.v2
-  rm -f project-config.jam
-
-  重新生成 b2：
-
-  ./bootstrap.sh \
-    --with-toolset=gcc \
-    --prefix="$PREFIX"
-
-  确认 b2 能运行：
-
-  ./b2 --version
-
-  编译 FORWORD 需要的两个库：
-
-  ./b2 -j1 \
-    --with-system \
-    --with-filesystem \
-    toolset=gcc \
-    link=static \
-    runtime-link=shared \
-    threading=multi \
-    variant=release \
-    cxxflags="-O2 -fPIC" \
-    install
-
-  成功后验证：
-
-  find "$PREFIX" \
-    \( -name 'libboost_system.a' -o \
-       -name 'libboost_filesystem.a' \) \
-    -print
-
-  ls "$PREFIX/include/boost/version.hpp"
-
-  如果 Boost 再次失败，请使用 -j1 输出中的第一条 error: 作为排查起点。Boost 完成后，下一步是重新编译 glog 和 btor2tools。
+  完成这两项后，下一步是原生配置和编译 smt-switch，让它链接刚刚构建的 Bitwuzla、GMP、Bison/Flex，并处理仓库里 cvc5 预编译库的
+  兼容性。
