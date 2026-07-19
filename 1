@@ -1,59 +1,143 @@
-Python 3.8 比 Python 3.10 更适合老 CentOS 7 环境。需要在联网机器上把下面两个包加入 packages/：
+#!/bin/bash
+#
+# BMC 批量实验脚本
+# 对 benchmark 目录下所有 .btor2 文件运行 bmc，支持可调并行度
+#
+# 用法:
+#   ./run_bmc_exp.sh [并行度] [iteration] [bound] [find_unsat] [find_sat]
+#
+# 示例:
+#   ./run_bmc_exp.sh          # 默认并行度 10
+#   ./run_bmc_exp.sh 20       # 并行度 20
+#   ./run_bmc_exp.sh 10 300 15 300 1  # 自定义所有参数
+#
 
-  Python-3.8.18.tgz
-  meson-0.64.1.tar.gz
+set -o pipefail
 
-  然后在 CentOS 用户目录编译 Python：
+# ==================== 可配置参数 ====================
 
-  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export PREFIX=$ROOT/.local-centos7
-  export JOBS=$(nproc)
+# 并行度（第一个命令行参数，默认 10）
+PARALLEL=${1:-10}
 
-  cd "$ROOT/packages"
+# BMC 参数（命令行参数 2-6，带默认值）
+ITERATION=${2:-200}
+BOUND=${3:-10}
+FIND_UNSAT=${4:-200}
+FIND_SAT=${5:-1}
 
-  tar -xzf Python-3.8.18.tgz
-  cd Python-3.8.18
+# 路径配置
+BMC_BIN="./build/bmc"                                                  # bmc 可执行文件
+BENCHMARK_DIR="/home/jiongming/desktop/FORWORD/benchmark/bmc_benchmark" # 测试用例目录
+LOG_DIR="/home/jiongming/desktop/forword_exp/1"                         # 日志输出目录
 
-  ./configure \
-    --prefix="$PREFIX/python-3.8" \
-    --without-ensurepip
+# ==================== 初始化 ====================
 
-  make -j"$JOBS"
-  make install
+mkdir -p "$LOG_DIR"
 
-  验证：
+# 统计信息
+TOTAL=$(find "$BENCHMARK_DIR" -name "*.btor2" -type f | wc -l)
+PASS_FILE="$LOG_DIR/.pass_count"
+FAIL_FILE="$LOG_DIR/.fail_count"
+echo 0 > "$PASS_FILE"
+echo 0 > "$FAIL_FILE"
 
-  "$PREFIX/python-3.8/bin/python3.8" --version
+# ==================== 单个任务执行函数 ====================
 
-  然后解压并运行 Meson：
+run_bmc() {
+    local btor2_file="$1"
 
-  cd "$ROOT/packages"
+    # 生成日志文件名：用相对路径，斜杠替换为下划线
+    local rel_path="${btor2_file#$BENCHMARK_DIR/}"
+    local case_name="${rel_path%.btor2}"
+    local case_name_clean="${case_name//\//_}"
+    local log_file="$LOG_DIR/${case_name_clean}.log"
 
-  tar -xzf meson-0.64.1.tar.gz
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting: $case_name_clean"
 
-  "$PREFIX/python-3.8/bin/python3.8" \
-    "$ROOT/packages/meson-0.64.1/meson.py" \
-    --version
+    # 执行 bmc
+    "$BMC_BIN" --file "$btor2_file" \
+        --iteration "$ITERATION" \
+        --bound "$BOUND" \
+        --find_unsat "$FIND_UNSAT" \
+        --find_sat "$FIND_SAT" \
+        2>&1 | tee "$log_file"
 
-  ## 使用离线 Meson 构建 Bitwuzla
+    local exit_code=${PIPESTATUS[0]}
 
-  确认 Meson 显示 0.64.1 后：
+    if [ $exit_code -eq 0 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] PASS: $case_name_clean"
+        # 原子递增通过计数
+        (
+            flock -x 200
+            cnt=$(cat "$PASS_FILE")
+            echo $((cnt + 1)) > "$PASS_FILE"
+        ) 200>"$LOG_DIR/.counter_lock"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL (exit=$exit_code): $case_name_clean"
+        (
+            flock -x 200
+            cnt=$(cat "$FAIL_FILE")
+            echo $((cnt + 1)) > "$FAIL_FILE"
+        ) 200>"$LOG_DIR/.counter_lock"
+    fi
 
-  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export PREFIX=$ROOT/.local-centos7
-  export JOBS=$(nproc)
+    return $exit_code
+}
 
-  export PYTHON38="$PREFIX/python-3.8/bin/python3.8"
-  export MESON="$ROOT/packages/meson-0.64.1/meson.py"
-  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+# 导出函数和变量供 xargs 子进程使用
+export -f run_bmc
+export BMC_BIN BENCHMARK_DIR LOG_DIR ITERATION BOUND FIND_UNSAT FIND_SAT PASS_FILE FAIL_FILE
 
-  不要调用 Bitwuzla 自带的 configure.py，因为它会寻找名为 meson 的命令。直接运行 Meson：
+# ==================== 打印实验配置 ====================
 
-  "$PYTHON38" "$MESON" install \
-    -C "$ROOT/host-build/bitwuzla"
+echo "============================================"
+echo "  BMC 批量实验"
+echo "============================================"
+echo "  BMC binary:    $BMC_BIN"
+echo "  Benchmark dir: $BENCHMARK_DIR"
+echo "  Log dir:       $LOG_DIR"
+echo "  Test cases:    $TOTAL"
+echo "  Parallelism:   $PARALLEL"
+echo "  Iteration:     $ITERATION"
+echo "  Bound:         $BOUND"
+echo "  Find unsat:    $FIND_UNSAT"
+echo "  Find sat:      $FIND_SAT"
+echo "============================================"
+echo ""
 
-  验证：
+START_TIME=$(date +%s)
 
-  find "$PREFIX" \
-    \( -name 'libbitwuzla*.a' -o -name 'bitwuzla.pc' \) \
-    -print
+# ==================== 并行执行 ====================
+
+find "$BENCHMARK_DIR" -name "*.btor2" -type f | sort | \
+    xargs -P "$PARALLEL" -I {} bash -c 'run_bmc "$@"' _ {}
+
+# ==================== 结果汇总 ====================
+
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+PASS_CNT=$(cat "$PASS_FILE")
+FAIL_CNT=$(cat "$FAIL_FILE")
+
+echo ""
+echo "============================================"
+echo "  实验完成"
+echo "============================================"
+echo "  总用例数:     $TOTAL"
+echo "  通过:         $PASS_CNT"
+echo "  失败:         $FAIL_CNT"
+echo "  耗时:         ${ELAPSED}s ($((ELAPSED / 60))m $((ELAPSED % 60))s)"
+echo "  日志目录:     $LOG_DIR"
+echo "============================================"
+
+# 列出失败的用例
+if [ "$FAIL_CNT" -gt 0 ]; then
+    echo ""
+    echo "失败用例列表:"
+    grep -l "FAIL" "$LOG_DIR"/*.log 2>/dev/null | while read f; do
+        basename "$f" .log
+    done
+fi
+
+# 清理临时文件
+rm -f "$PASS_FILE" "$FAIL_FILE" "$LOG_DIR/.counter_lock"
