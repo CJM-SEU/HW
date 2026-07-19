@@ -1,143 +1,37 @@
-#!/bin/bash
-#
-# BMC 批量实验脚本
-# 对 benchmark 目录下所有 .btor2 文件运行 bmc，支持可调并行度
-#
-# 用法:
-#   ./run_bmc_exp.sh [并行度] [iteration] [bound] [find_unsat] [find_sat]
-#
-# 示例:
-#   ./run_bmc_exp.sh          # 默认并行度 10
-#   ./run_bmc_exp.sh 20       # 并行度 20
-#   ./run_bmc_exp.sh 10 300 15 300 1  # 自定义所有参数
-#
+原因是 bmc 依赖动态库 libwasim.so，但运行时动态链接器没有在搜索路径中找到它。
 
-set -o pipefail
+  我检查了当前文件：
 
-# ==================== 可配置参数 ====================
+  - bmc：/home/jiongming/desktop/FORWORD/build/bmc
+  - 动态库：/home/jiongming/desktop/FORWORD/build/libwasim.so
 
-# 并行度（第一个命令行参数，默认 10）
-PARALLEL=${1:-10}
+  目前直接执行 ldd /home/jiongming/desktop/FORWORD/build/bmc 已经可以正确解析该库。不过脚本存在一个路径隐患：
 
-# BMC 参数（命令行参数 2-6，带默认值）
-ITERATION=${2:-200}
-BOUND=${3:-10}
-FIND_UNSAT=${4:-200}
-FIND_SAT=${5:-1}
+  BMC_BIN="./build/bmc"
 
-# 路径配置
-BMC_BIN="./build/bmc"                                                  # bmc 可执行文件
-BENCHMARK_DIR="/home/jiongming/desktop/FORWORD/benchmark/bmc_benchmark" # 测试用例目录
-LOG_DIR="/home/jiongming/desktop/forword_exp/1"                         # 日志输出目录
+  这里的 ./ 是执行脚本时的当前目录，并不是脚本所在目录。因此：
 
-# ==================== 初始化 ====================
+  cd /home/jiongming/desktop/FORWORD
+  /home/jiongming/desktop/forword_exp/run_bmc_exp.sh
 
-mkdir -p "$LOG_DIR"
+  会使用正确的 FORWORD/build/bmc；但从其他目录执行脚本，就可能使用错误的 build/bmc，或者直接找不到二进制。
 
-# 统计信息
-TOTAL=$(find "$BENCHMARK_DIR" -name "*.btor2" -type f | wc -l)
-PASS_FILE="$LOG_DIR/.pass_count"
-FAIL_FILE="$LOG_DIR/.fail_count"
-echo 0 > "$PASS_FILE"
-echo 0 > "$FAIL_FILE"
+  可以先这样运行：
 
-# ==================== 单个任务执行函数 ====================
+  cd /home/jiongming/desktop/FORWORD
+  export LD_LIBRARY_PATH=/home/jiongming/desktop/FORWORD/build:${LD_LIBRARY_PATH:-}
+  /home/jiongming/desktop/forword_exp/run_bmc_exp.sh
 
-run_bmc() {
-    local btor2_file="$1"
+  更可靠的脚本修复方式是改成绝对路径，并显式加入动态库目录：
 
-    # 生成日志文件名：用相对路径，斜杠替换为下划线
-    local rel_path="${btor2_file#$BENCHMARK_DIR/}"
-    local case_name="${rel_path%.btor2}"
-    local case_name_clean="${case_name//\//_}"
-    local log_file="$LOG_DIR/${case_name_clean}.log"
+  PROJECT_DIR="/home/jiongming/desktop/FORWORD"
+  BMC_BIN="$PROJECT_DIR/build/bmc"
+  export LD_LIBRARY_PATH="$PROJECT_DIR/build:${LD_LIBRARY_PATH:-}"
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting: $case_name_clean"
+  可以用下面两条命令验证：
 
-    # 执行 bmc
-    "$BMC_BIN" --file "$btor2_file" \
-        --iteration "$ITERATION" \
-        --bound "$BOUND" \
-        --find_unsat "$FIND_UNSAT" \
-        --find_sat "$FIND_SAT" \
-        2>&1 | tee "$log_file"
+  ldd /home/jiongming/desktop/FORWORD/build/bmc | grep wasim
+  readelf -d /home/jiongming/desktop/FORWORD/build/bmc | grep -E 'RPATH|RUNPATH'
 
-    local exit_code=${PIPESTATUS[0]}
-
-    if [ $exit_code -eq 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] PASS: $case_name_clean"
-        # 原子递增通过计数
-        (
-            flock -x 200
-            cnt=$(cat "$PASS_FILE")
-            echo $((cnt + 1)) > "$PASS_FILE"
-        ) 200>"$LOG_DIR/.counter_lock"
-    else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL (exit=$exit_code): $case_name_clean"
-        (
-            flock -x 200
-            cnt=$(cat "$FAIL_FILE")
-            echo $((cnt + 1)) > "$FAIL_FILE"
-        ) 200>"$LOG_DIR/.counter_lock"
-    fi
-
-    return $exit_code
-}
-
-# 导出函数和变量供 xargs 子进程使用
-export -f run_bmc
-export BMC_BIN BENCHMARK_DIR LOG_DIR ITERATION BOUND FIND_UNSAT FIND_SAT PASS_FILE FAIL_FILE
-
-# ==================== 打印实验配置 ====================
-
-echo "============================================"
-echo "  BMC 批量实验"
-echo "============================================"
-echo "  BMC binary:    $BMC_BIN"
-echo "  Benchmark dir: $BENCHMARK_DIR"
-echo "  Log dir:       $LOG_DIR"
-echo "  Test cases:    $TOTAL"
-echo "  Parallelism:   $PARALLEL"
-echo "  Iteration:     $ITERATION"
-echo "  Bound:         $BOUND"
-echo "  Find unsat:    $FIND_UNSAT"
-echo "  Find sat:      $FIND_SAT"
-echo "============================================"
-echo ""
-
-START_TIME=$(date +%s)
-
-# ==================== 并行执行 ====================
-
-find "$BENCHMARK_DIR" -name "*.btor2" -type f | sort | \
-    xargs -P "$PARALLEL" -I {} bash -c 'run_bmc "$@"' _ {}
-
-# ==================== 结果汇总 ====================
-
-END_TIME=$(date +%s)
-ELAPSED=$((END_TIME - START_TIME))
-PASS_CNT=$(cat "$PASS_FILE")
-FAIL_CNT=$(cat "$FAIL_FILE")
-
-echo ""
-echo "============================================"
-echo "  实验完成"
-echo "============================================"
-echo "  总用例数:     $TOTAL"
-echo "  通过:         $PASS_CNT"
-echo "  失败:         $FAIL_CNT"
-echo "  耗时:         ${ELAPSED}s ($((ELAPSED / 60))m $((ELAPSED % 60))s)"
-echo "  日志目录:     $LOG_DIR"
-echo "============================================"
-
-# 列出失败的用例
-if [ "$FAIL_CNT" -gt 0 ]; then
-    echo ""
-    echo "失败用例列表:"
-    grep -l "FAIL" "$LOG_DIR"/*.log 2>/dev/null | while read f; do
-        basename "$f" .log
-    done
-fi
-
-# 清理临时文件
-rm -f "$PASS_FILE" "$FAIL_FILE" "$LOG_DIR/.counter_lock"
+  当前这台机器上的 bmc 内嵌了 /home/jiongming/desktop/FORWORD/build 的 RPATH，所以现在能够找到库。如果日志来自旧版本 bmc、复制到另一台机器的构建产物，或者项目路径
+  发生过变化，旧的绝对 RPATH 就可能失效；重新编译或设置 LD_LIBRARY_PATH 即可解决。
