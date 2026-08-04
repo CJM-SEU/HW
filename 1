@@ -1,273 +1,235 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Run every benchmark property through the full dpv flow (assume check + mul
+# abstraction + verified simplify + solve), one dpv invocation PER
+# PROPERTY, in parallel, and summarize.
 #
-# BMC 批量实验脚本
-# 对 benchmark 目录下所有 .btor2 文件运行 bmc，支持可调并行度
+# Why per-property:
+#   * dpv is a single-property engine; --property N prunes preprocessing DCE to that bad's
+#     cone, so the other properties' logic -- their multipliers above all -- is
+#     gone before any later operation runs. Most properties in this suite become
+#     pure boolean problems that way (616_dd_00_a: 7 of its 8 drop 35 muls to 0).
+#   * It makes engine comparisons honest. Solving a whole model, the bitwuzla
+#     frontend has different scheduling and preprocessing behaviour.
+#     Per-property, every invocation reports exactly one verdict, so Bitwuzla
+#     and bitblast+Kissat are measured on the same footing.
 #
-# 用法:
-#   ./run_bmc_exp.sh [并行度] [iteration] [最大frame] [find_unsat] [find_sat] [resume|fresh]
+# Comparing the two engines (same properties, same budgets):
+#   OUT_DIR=bench-bzla DPV_FLAGS="--solve-engine bitwuzla" scripts/benchmark.sh
+#   OUT_DIR=bench-both scripts/benchmark.sh        # defaults to the portfolio
 #
-# 示例:
-#   ./run_bmc_exp.sh          # 默认并行度 10，并自动续跑
-#   ./run_bmc_exp.sh 20       # 并行度 20
-#   ./run_bmc_exp.sh 10 300 15 300 1  # 自定义所有参数
-#   ./run_bmc_exp.sh 10 100 30 20 1 fresh   # 忽略已有日志，重跑全部 case
+# The release profiles are taken from doc/benchmark.md:
+#   * 412*:               both, -t 4000, preprocessing 3000, PAR=4
+#   * 616*:               both + algebra,SCA, -t 1800, PAR=4
+# Root-level files outside the 412/616 release suites are skipped.
 #
+# Usage:   scripts/benchmark.sh
+# Env vars (all optional):
+#   DPV_BIN     dpv binary                    (default build/dpv)
+#   BENCH_DIR   directory of *.btor           (default benchmark/)
+#   OUT_DIR     where logs+summary go         (default bench-results/)
+#   TIMEOUT     override each profile's dpv -t and outer guard
+#   PAR         override each profile's outer parallelism
+#   JOBS        analysis/simulation workers per dpv (default 1; final solver
+#                                                    portfolio is always 1 or 2)
+#   DPV_FLAGS   extra dpv flags appended after the profile flags
+set -u
 
-set -o pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BIN="${DPV_BIN:-$ROOT/build/dpv}"
+BENCH_DIR="${BENCH_DIR:-$ROOT/benchmark}"
+OUT_DIR="${OUT_DIR:-$ROOT/bench-results}"
+TIMEOUT="${TIMEOUT:-}"
+PAR="${PAR:-}"
+JOBS="${JOBS:-1}"
+DPV_FLAGS="${DPV_FLAGS:-}"
 
-# ==================== 可配置参数 ====================
+# GNU coreutils timeout (Linux `timeout`, macOS Homebrew `gtimeout`).
+TO=timeout
+command -v "$TO" >/dev/null 2>&1 || TO=gtimeout
+command -v "$TO" >/dev/null 2>&1 || { echo "need coreutils 'timeout'"; exit 1; }
+[ -x "$BIN" ] || { echo "dpv binary not found: $BIN"; exit 1; }
+ls "$BENCH_DIR"/*.btor >/dev/null 2>&1 || { echo "no *.btor in $BENCH_DIR"; exit 1; }
+mkdir -p "$OUT_DIR/logs"
+SUMMARY="$OUT_DIR/summary.tsv"
 
-# 并行度（第一个命令行参数，默认 10）
-PARALLEL=${1:-20}
-
-# BMC 参数（命令行参数 2-5，带默认值）
-ITERATION=${2:-200}
-MAX_BOUND=${3:-50}
-FIND_UNSAT=${4:-50}
-FIND_SAT=${5:-1}
-RUN_MODE=${6:-resume}
-
-# 每个 case（包含其所有 frame）的总时间上限，单位秒
-CASE_TIMEOUT=${CASE_TIMEOUT:-3600}
-
-# 路径配置
-BMC_BIN="/home/jiongming/desktop/FORWORD/build/bmc"                                                  # bmc 可执行文件
-BENCHMARK_DIR="/home/jiongming/desktop/forword_exp/benchmark_fixed" # 测试用例目录
-LOG_DIR="/home/jiongming/desktop/forword_exp/exp5"                         # 日志输出目录
-
-# ==================== 初始化 ====================
-
-mkdir -p "$LOG_DIR"
-
-if ! [[ "$MAX_BOUND" =~ ^[1-9][0-9]*$ ]]; then
-    echo "[ERROR] 最大frame必须是大于等于1的整数，当前值: $MAX_BOUND" >&2
-    exit 2
-fi
-
-if [ "$RUN_MODE" != "fresh" ] && [ "$RUN_MODE" != "resume" ] && [ "$RUN_MODE" != "--resume" ]; then
-    echo "[ERROR] 第六个参数只能是 resume/--resume 或 fresh" >&2
-    exit 2
-fi
-
-if [ "$RUN_MODE" = "--resume" ]; then
-    RUN_MODE="resume"
-fi
-
-RUN_CONFIG="iteration=$ITERATION max_bound=$MAX_BOUND find_unsat=$FIND_UNSAT find_sat=$FIND_SAT case_timeout=$CASE_TIMEOUT"
-
-# 统计信息
-TOTAL=$(find "$BENCHMARK_DIR" -name "*.btor2" -type f | wc -l)
-PASS_FILE="$LOG_DIR/.pass_count"
-FAIL_FILE="$LOG_DIR/.fail_count"
-TIMEOUT_FILE="$LOG_DIR/.timeout_count"
-SKIP_FILE="$LOG_DIR/.skip_count"
-echo 0 > "$PASS_FILE"
-echo 0 > "$FAIL_FILE"
-echo 0 > "$TIMEOUT_FILE"
-echo 0 > "$SKIP_FILE"
-
-increment_counter() {
-    local counter_file="$1"
-    (
-        flock -x 200
-        local cnt
-        cnt=$(cat "$counter_file")
-        echo $((cnt + 1)) > "$counter_file"
-    ) 200>"$LOG_DIR/.counter_lock"
+# Verdict/statistics extraction for one property. $1 = log, $2 = exit code.
+# Sets g_status g_sat g_unsat g_unknown g_abs g_merged g_constraints g_risky.
+scan_log() {
+  local log="$1" rc="$2"
+  g_sat=$(grep -c ' satisfiable\.' "$log")      # leading space avoids "unsat"
+  g_unsat=$(grep -c 'unsatisfiable\.' "$log")
+  g_unknown=$(grep -c 'Bad property .* unknown\.' "$log")
+  g_abs=$(grep -oE 'abstracted [0-9]+ multiplier' "$log" | grep -oE '[0-9]+' | head -1)
+  g_abs=${g_abs:-0}
+  # Read the authoritative cut total from the simplify summary. A
+  # carrier-backed variable-shift pair may now contribute both proved input
+  # constraints and one sound mul cut, so excluding every "variable-shift"
+  # progress line would undercount it. Fall back to progress-line counting
+  # only when an outer timeout kills the run before the summary is printed.
+  g_merged=$(grep -oE '[0-9]+ operator\(s\) simplified' "$log" |
+             head -1 | grep -oE '^[0-9]+')
+  if [ -z "$g_merged" ]; then
+    g_merged=$(grep -Ec \
+      '=> (PROVEN|RISKY-MERGE).*merge|=> PROVEN carrier-backed variable-shift mul cut' \
+      "$log")
+  fi
+  g_merged=${g_merged:-0}
+  g_constraints=$(awk '
+    /appended [0-9]+ equality constraint/ {
+      for (i = 1; i <= NF; ++i)
+        if ($i == "appended" && $(i + 1) ~ /^[0-9]+$/) {
+          n += $(i + 1)
+          break
+        }
+    }
+    /appended proven mul output equality constraint/ { ++n }
+    /appended [0-9]+ proven FP\/control-guarded mul relation constraint/ {
+      for (i = 1; i <= NF; ++i)
+        if ($i == "appended" && $(i + 1) ~ /^[0-9]+$/) {
+          n += $(i + 1)
+          break
+        }
+    }
+    END { print n + 0 }
+  ' "$log")
+  g_risky=$(grep -c '=> RISKY-MERGE' "$log")
+  case "$rc" in
+    124|137|143) g_status=TIMEOUT ;;   # timeout: TERM(143)/KILL(137)/124
+    20)          g_status=unsat ;;
+    10)          g_status=sat ;;
+    0)           g_status=undecided ;;
+    *)           g_status="err($rc)" ;;
+  esac
+  grep -qiE 'terminate|Assertion|Segmentation|runtime_error|abort called' "$log" \
+    && g_status="$g_status/exc"
 }
+export -f scan_log
 
-# ==================== 单个任务执行函数 ====================
-
-run_bmc() {
-    local btor2_file="$1"
-
-    # 生成日志文件名：用相对路径，斜杠替换为下划线
-    local rel_path="${btor2_file#$BENCHMARK_DIR/}"
-    local case_name="${rel_path%.btor2}"
-    local case_name_clean="${case_name//\//_}"
-    local log_file="$LOG_DIR/${case_name_clean}.log"
-
-    local frame frame_log exit_code case_status="COMPLETED" stop_frame=0
-    local case_start now remaining last_completed_frame=0 solve_result="UNKNOWN"
-
-    if [ "$RUN_MODE" = "resume" ] && [ -f "$log_file" ] \
-        && grep -Fqx "RUN_CONFIG: $RUN_CONFIG" "$log_file" \
-        && grep -q '^CASE_COMPLETE: yes$' "$log_file"; then
-        local saved_status saved_result
-        saved_status=$(awk -F': ' '/^CASE_STATUS: /{value=$2} END{print value}' "$log_file")
-        saved_result=$(awk -F': ' '/^SOLVE_RESULT: /{value=$2} END{print value}' "$log_file")
-
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: $case_name_clean ($saved_status; $saved_result)"
-        increment_counter "$SKIP_FILE"
-        if [ "$saved_status" = "TIMEOUT" ]; then
-            increment_counter "$TIMEOUT_FILE"
-        fi
-        if { [ "$saved_status" = "COMPLETED" ] || [ "$saved_status" = "TIMEOUT" ]; } \
-            && [[ "$saved_result" == PASS* ]]; then
-            increment_counter "$PASS_FILE"
-            return 0
-        fi
-        increment_counter "$FAIL_FILE"
-        return 1
-    fi
-
-    : > "$log_file"
-    case_start=$(date +%s)
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting: $case_name_clean (frames 1..$MAX_BOUND, timeout=${CASE_TIMEOUT}s)" | tee -a "$log_file"
-    echo "RUN_CONFIG: $RUN_CONFIG" | tee -a "$log_file"
-
-    # 当前 bmc 只检查指定 bound，因此逐帧运行。首次发现反例或工具错误即停止。
-    for ((frame = 1; frame <= MAX_BOUND; frame++)); do
-        now=$(date +%s)
-        remaining=$((CASE_TIMEOUT - (now - case_start)))
-        if [ "$remaining" -le 0 ]; then
-            case_status="TIMEOUT"
-            stop_frame=$frame
-            break
-        fi
-
-        frame_log="${log_file}.frame_${frame}.tmp"
-        echo "===== FRAME $frame / $MAX_BOUND (case time remaining: ${remaining}s) =====" | tee -a "$log_file"
-
-        timeout --signal=TERM --kill-after=10s "${remaining}s" \
-            "$BMC_BIN" --file "$btor2_file" \
-            --iteration "$ITERATION" \
-            --bound "$frame" \
-            --find_unsat "$FIND_UNSAT" \
-            --find_sat "$FIND_SAT" \
-            2>&1 | tee "$frame_log" | tee -a "$log_file"
-
-        exit_code=${PIPESTATUS[0]}
-
-        if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 137 ]; then
-            case_status="TIMEOUT"
-            stop_frame=$frame
-            echo "[TIMEOUT] Case exceeded ${CASE_TIMEOUT}s while checking frame $frame" | tee -a "$log_file"
-            break
-        elif [ "$exit_code" -ne 0 ]; then
-            case_status="ERROR"
-            stop_frame=$frame
-            solve_result="UNKNOWN (tool error at frame $frame)"
-            echo "CASE_RESULT: ERROR at frame $frame (exit=$exit_code)" | tee -a "$log_file"
-            break
-        elif grep -q '^\[RESULT\] Failed at bound ' "$frame_log"; then
-            case_status="VIOLATION"
-            stop_frame=$frame
-            solve_result="FAIL at frame $frame"
-            echo "CASE_RESULT: VIOLATION at frame $frame" | tee -a "$log_file"
-            break
-        elif ! grep -q "^\[RESULT\] Bound $frame passed\." "$frame_log"; then
-            case_status="ERROR"
-            stop_frame=$frame
-            solve_result="UNKNOWN (missing result at frame $frame)"
-            echo "CASE_RESULT: ERROR at frame $frame (missing recognized result)" | tee -a "$log_file"
-            break
-        fi
-
-        last_completed_frame=$frame
-        solve_result="PASS through frame $frame"
-        rm -f "$frame_log"
-    done
-
-    rm -f "${log_file}.frame_"*.tmp
-
-    if [ "$case_status" = "COMPLETED" ]; then
-        solve_result="PASS through frame $MAX_BOUND"
-        echo "CASE_RESULT: PASS through frame $MAX_BOUND" | tee -a "$log_file"
-        echo "CASE_STATUS: COMPLETED" | tee -a "$log_file"
-        echo "SOLVE_RESULT: $solve_result" | tee -a "$log_file"
-        echo "CASE_COMPLETE: yes" | tee -a "$log_file"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] PASS: $case_name_clean (frames 1..$MAX_BOUND)"
-        increment_counter "$PASS_FILE"
-    elif [ "$case_status" = "TIMEOUT" ]; then
-        if [ "$last_completed_frame" -gt 0 ]; then
-            solve_result="PASS through frame $last_completed_frame"
-        else
-            solve_result="UNKNOWN (no frame completed)"
-        fi
-        echo "CASE_RESULT: TIMEOUT at frame $stop_frame; previous result: $solve_result" | tee -a "$log_file"
-        echo "CASE_STATUS: TIMEOUT" | tee -a "$log_file"
-        echo "SOLVE_RESULT: $solve_result" | tee -a "$log_file"
-        echo "CASE_COMPLETE: yes" | tee -a "$log_file"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] TIMEOUT: $case_name_clean ($solve_result)"
-        increment_counter "$TIMEOUT_FILE"
-        if [[ "$solve_result" == PASS* ]]; then
-            increment_counter "$PASS_FILE"
-        else
-            increment_counter "$FAIL_FILE"
-        fi
-    else
-        echo "CASE_STATUS: $case_status" | tee -a "$log_file"
-        echo "SOLVE_RESULT: $solve_result" | tee -a "$log_file"
-        echo "CASE_COMPLETE: yes" | tee -a "$log_file"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] FAIL ($case_status at frame $stop_frame): $case_name_clean"
-        increment_counter "$FAIL_FILE"
-    fi
-
-    [[ "$solve_result" == PASS* ]]
+# --- per-property mode ------------------------------------------------------
+run_prop() {
+  local f="$1" p="$2" profile="$3" base log rc t0 t1 secs verdict badid
+  local dpv_timeout
+  local -a profile_flags extra_flags
+  case "$profile" in
+    412)
+      dpv_timeout="${TIMEOUT:-4000}"
+      profile_flags=(--solve-engine both -t "$dpv_timeout"
+                     --preprocess-timeout 3000)
+      ;;
+    616)
+      dpv_timeout="${TIMEOUT:-1800}"
+      profile_flags=(--solve-engine both --abstract-methods algebra,sca
+                     -t "$dpv_timeout")
+      ;;
+    *)
+      echo "internal error: unknown benchmark profile '$profile'" >&2
+      return 1
+      ;;
+  esac
+  # DPV_FLAGS intentionally uses ordinary shell-style whitespace splitting,
+  # matching the script's historical interface for additional simple flags.
+  read -r -a extra_flags <<< "$DPV_FLAGS"
+  base="$(basename "$f" .btor)"
+  log="$OUT_DIR/logs/$base.p$p.log"
+  t0=$(date +%s)
+  # The outer guard gets a margin over the per-property budget: dpv's own -t
+  # is the intended limit, and killing dpv in the same second it is printing
+  # its UNKNOWN verdict turns a valid result into `none`.
+  "$TO" -k 15 $((dpv_timeout + 60)) "$BIN" "${profile_flags[@]}" \
+    "${extra_flags[@]}" --property "$p" -j "$JOBS" "$f" \
+    > "$log" 2>&1
+  rc=$?
+  t1=$(date +%s); secs=$((t1 - t0))
+  scan_log "$log" "$rc"
+  # Exactly one property per run, so its verdict is a single word. `none` means
+  # the run was killed before it could report anything.
+  if   [ "$g_sat"     -gt 0 ]; then verdict=sat
+  elif [ "$g_unsat"   -gt 0 ]; then verdict=unsat
+  elif [ "$g_unknown" -gt 0 ]; then verdict=unknown
+  else                              verdict=none
+  fi
+  badid=$(grep -oE 'Bad property [0-9]+' "$log" | head -1 | grep -oE '[0-9]+')
+  # Concurrent single-line appends are atomic (< PIPE_BUF). Derive the path from
+  # OUT_DIR (exported): $SUMMARY is a parent-shell local, invisible to the child.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$base" "$p" "${badid:-?}" "$verdict" "$g_status" "$secs" "$g_abs" \
+    "$g_merged" "$g_constraints" "$g_risky" >> "$OUT_DIR/summary.tsv"
+  echo "[done] $base p$p  $verdict  ${secs}s  ($g_status abs=$g_abs merged=$g_merged constraints=$g_constraints)"
 }
+export -f run_prop
 
-# 导出函数和变量供 xargs 子进程使用
-export -f run_bmc increment_counter
-export BMC_BIN BENCHMARK_DIR LOG_DIR ITERATION MAX_BOUND FIND_UNSAT FIND_SAT RUN_MODE CASE_TIMEOUT
-export PASS_FILE FAIL_FILE TIMEOUT_FILE SKIP_FILE RUN_CONFIG
+export TO TIMEOUT BIN DPV_FLAGS OUT_DIR JOBS
 
-# ==================== 打印实验配置 ====================
+# Work list: one "<file> <property-index>" line per bad. The count comes straight
+# from the file, which is exactly what --property indexes into.
+WORK412="$OUT_DIR/worklist-412.txt"
+WORK616="$OUT_DIR/worklist-616.txt"
+: > "$WORK412"
+: > "$WORK616"
+ncases=0
+n412=0
+n616=0
+for f in "$BENCH_DIR"/*.btor; do
+  base="$(basename "$f" .btor)"
+  case "$base" in
+    412*) target="$WORK412"; group=412 ;;
+    616*) target="$WORK616"; group=616 ;;
+    *) echo "note: $base is outside the documented 412/616 release suites, skipped"; continue ;;
+  esac
+  n=$(grep -cE '^[0-9]+ bad ' "$f")
+  [ "$n" -gt 0 ] || { echo "note: $(basename "$f") has no bad property, skipped"; continue; }
+  ncases=$((ncases + 1))
+  case "$group" in
+    412) n412=$((n412 + 1)) ;;
+    616) n616=$((n616 + 1)) ;;
+  esac
+  i=0
+  while [ "$i" -lt "$n" ]; do echo "$f $i" >> "$target"; i=$((i + 1)); done
+done
+nprops412=$(wc -l < "$WORK412" | tr -d ' ')
+nprops616=$(wc -l < "$WORK616" | tr -d ' ')
+nprops=$((nprops412 + nprops616))
+[ "$nprops" -gt 0 ] || { echo "no documented 412/616 benchmark properties found"; exit 1; }
 
-echo "============================================"
-echo "  BMC 批量实验"
-echo "============================================"
-echo "  BMC binary:    $BMC_BIN"
-echo "  Benchmark dir: $BENCHMARK_DIR"
-echo "  Log dir:       $LOG_DIR"
-echo "  Test cases:    $TOTAL"
-echo "  Parallelism:   $PARALLEL"
-echo "  Iteration:     $ITERATION"
-echo "  Frames:        1..$MAX_BOUND"
-echo "  Find unsat:    $FIND_UNSAT"
-echo "  Find sat:      $FIND_SAT"
-echo "  Case timeout:  ${CASE_TIMEOUT}s"
-echo "  Run mode:      $RUN_MODE"
-echo "============================================"
-echo ""
+printf 'file\tprop\tbad_id\tverdict\tstatus\tsecs\tabstracted\tmerged\tconstraints\trisky\n' \
+  > "$SUMMARY"
+echo ">> $ncases cases / $nprops properties, JOBS=$JOBS"
+echo ">> 412: $n412 cases / $nprops412 properties; -t ${TIMEOUT:-4000}, preprocess=3000, PAR=${PAR:-4}"
+echo ">> 616 (all, including 616_casesplit_a): $n616 cases / $nprops616 properties; -t ${TIMEOUT:-1800}, PAR=${PAR:-4}"
+[ -z "$DPV_FLAGS" ] || echo ">> extra flags: $DPV_FLAGS"
 
-START_TIME=$(date +%s)
-
-# ==================== 并行执行 ====================
-
-find "$BENCHMARK_DIR" -name "*.btor2" -type f | sort | \
-    xargs -P "$PARALLEL" -I {} bash -c 'run_bmc "$@"' _ {}
-
-# ==================== 结果汇总 ====================
-
-END_TIME=$(date +%s)
-ELAPSED=$((END_TIME - START_TIME))
-PASS_CNT=$(cat "$PASS_FILE")
-FAIL_CNT=$(cat "$FAIL_FILE")
-TIMEOUT_CNT=$(cat "$TIMEOUT_FILE")
-SKIP_CNT=$(cat "$SKIP_FILE")
-
-echo ""
-echo "============================================"
-echo "  实验完成"
-echo "============================================"
-echo "  总用例数:     $TOTAL"
-echo "  通过:         $PASS_CNT"
-echo "  失败:         $FAIL_CNT"
-echo "  超时:         $TIMEOUT_CNT"
-echo "  Resume跳过:   $SKIP_CNT"
-echo "  耗时:         ${ELAPSED}s ($((ELAPSED / 60))m $((ELAPSED % 60))s)"
-echo "  日志目录:     $LOG_DIR"
-echo "============================================"
-
-# 列出失败的用例
-if [ "$FAIL_CNT" -gt 0 ]; then
-    echo ""
-    echo "失败用例列表:"
-    grep -l '^CASE_STATUS: \(VIOLATION\|ERROR\)' "$LOG_DIR"/*.log 2>/dev/null | while read f; do
-        basename "$f" .log
-    done
+# Run the documented profiles separately because 412 and 616 use different
+# outer parallelism. `< worklist` rather than `xargs -a` is portable.
+if [ -s "$WORK412" ]; then
+  xargs -P "${PAR:-4}" -L1 bash -c 'run_prop "$0" "$1" 412' < "$WORK412"
+fi
+if [ -s "$WORK616" ]; then
+  xargs -P "${PAR:-4}" -L1 bash -c 'run_prop "$0" "$1" 616' < "$WORK616"
 fi
 
-# 清理临时文件
-rm -f "$PASS_FILE" "$FAIL_FILE" "$TIMEOUT_FILE" "$SKIP_FILE" "$LOG_DIR/.counter_lock"
+echo
+echo "=== verdict distribution (per property) ==="
+awk -F'\t' 'NR>1{c[$4]++} END{for(k in c) printf "  %-10s %d\n",k,c[k]}' "$SUMMARY"
+
+# Per-case rollup on the END-TO-END criterion: a case counts as solved only when
+# EVERY one of its properties came back decided (sat or unsat). One undecided
+# property means the case is not solved, however many others were.
+BYCASE="$OUT_DIR/by-case.tsv"
+awk -F'\t' 'NR>1{
+    n[$1]++; secs[$1]+=$6;
+    if ($4=="sat") s[$1]++; else if ($4=="unsat") u[$1]++; else gap[$1]++;
+  }
+  END{
+    for (f in n) {
+      st = (gap[f] ? "UNSOLVED" : (s[f] ? "some-sat" : "all-unsat"));
+      printf "%s\t%d\t%d\t%d\t%d\t%s\t%d\n", f, n[f], s[f], u[f], gap[f], st, secs[f];
+    }
+  }' "$SUMMARY" | sort > "$BYCASE.body"
+printf 'file\tprops\tsat\tunsat\tgap\tstatus\tsecs\n' > "$BYCASE"
+cat "$BYCASE.body" >> "$BYCASE"; rm -f "$BYCASE.body"
+
+echo "=== end-to-end per case (solved only if EVERY property is decided) ==="
+awk -F'\t' 'NR>1{c[$6]++} END{for(k in c) printf "  %-10s %d\n",k,c[k]}' "$BYCASE"
+solved=$(awk -F'\t' 'NR>1 && $6!="UNSOLVED"' "$BYCASE" | wc -l | tr -d ' ')
+echo "  --> solved end to end: $solved / $ncases"
+echo "=== summary: $SUMMARY   per-case: $BYCASE ==="
