@@ -1,82 +1,33 @@
-请在 Python 源码目录执行以下诊断：
+#!/usr/bin/env bash
 
-  pwd
-  make --version | head -1
+set -u
 
-  sed -n '200,220p' Makefile
-  sed -n '211p' Makefile | cat -A
+LEFT_DIR="${1:-/home/jiongming/desktop/dpv}"
+RIGHT_DIR="${2:-/home/jiongming/desktop/dynamic/sources/dpv_fixed_by_codex}"
+OUTPUT_FILE="${3:-/home/jiongming/desktop/dpv_diff.patch}"
 
-  grep -nE '^(srcdir|abs_srcdir|prefix|exec_prefix|VERSION|LDVERSION)=' Makefile
+for dir in "$LEFT_DIR" "$RIGHT_DIR"; do
+    if [[ ! -d "$dir" ]]; then
+        echo "错误：目录不存在：$dir" >&2
+        exit 2
+    fi
+done
 
-  把输出发给我。重点是 Makefile 第 211 行。
+mkdir -p "$(dirname "$OUTPUT_FILE")"
 
-  同时检查 JOBS 是否正常：
+LC_ALL=C diff -ruN --exclude=.git -- "$LEFT_DIR" "$RIGHT_DIR" >"$OUTPUT_FILE"
+diff_status=$?
 
-  printf 'JOBS=<%s>\n' "$JOBS"
+case "$diff_status" in
+    0)
+        echo "两个目录内容一致；空的 diff 结果已保存到：$OUTPUT_FILE"
+        ;;
+    1)
+        echo "发现目录差异；diff 结果已保存到：$OUTPUT_FILE"
+        ;;
+    *)
+        echo "错误：diff 执行失败（退出码：$diff_status）" >&2
+        exit "$diff_status"
+        ;;
+esac
 
-  应当只是数字，例如：
-
-  JOBS=<32>
-
-  你也可以先排除 JOBS 的影响：
-
-  make -j2
-
-  不过 target pattern contains no '%' 通常与并行数无关。
-
-  最稳妥的重新配置方式
-
-  不要在源码目录内继续使用可能已损坏的 Makefile。建立单独构建目录：
-
-  export ROOT=/hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main
-  export PREFIX=$ROOT/.local-centos7
-  export PYTHON_SRC=$ROOT/packages/Python-3.8.18
-  export PYTHON_BUILD=$ROOT/host-build/python-3.8.18
-  export JOBS=$(nproc)
-
-  rm -rf "$PYTHON_BUILD"
-  mkdir -p "$PYTHON_BUILD"
-  cd "$PYTHON_BUILD"
-
-  确保相关环境变量没有异常值：
-
-  unset CONFIG_SITE
-  unset PYTHONHOME
-  unset PYTHONPATH
-
-  重新配置：
-
-  "$PYTHON_SRC/configure" \
-    --prefix="$PREFIX/python-3.8" \
-    --without-ensurepip
-
-  配置成功后先单线程测试：
-
-  make
-
-  如果单线程成功，再安装：
-
-  make install
-
-  验证：
-
-  "$PREFIX/python-3.8/bin/python3.8" --version
-
-  预期：
-
-  Python 3.8.18
-
-  特别注意：不要把命令提示符、中文引号或说明文字粘贴进 --prefix。正确前缀必须严格是：
-
-  /hongfeng/cwx1485722/code/forword_exp/FORWORD-HW-main/.local-centos7/python-3.8
-
-  如果重新配置后仍在第 211 行报错，请发来：
-
-  sed -n '205,215p' "$PYTHON_BUILD/Makefile" | cat -A
-
-  这会直接暴露 Makefile 中的异常字符或错误路径。
-
-
-› Improve documentation in @filename
-
-  gpt-5.6-sol default · ~/desktop/FORWORD
