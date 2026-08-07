@@ -1,138 +1,190 @@
-diff -ruN '--exclude=.git' -- a/src/main/meson.build b/src/main/meson.build
---- a/src/main/meson.build	2026-08-04 11:51:03.191438141 +0800
-+++ b/src/main/meson.build	2026-08-03 20:19:55.000000000 +0800
-@@ -2,11 +2,13 @@
- # Build Bitwuzla binary
- # ---
- 
--# Build static binary
-+# 离线动态构建适配：不强制 -static。原逻辑 build_static 时 link_args += '-static'，
-+# 使 -lm/-lpthread/-lc 只按【静态归档】搜索（ld 只找 libm.a/libpthread.a/libc.a），
-+# CentOS 7 目标机无 glibc-static 直接报 cannot find -lm/-lpthread/-lc。
-+# 去掉后按动态解析，由 build_all.sh 在 $SYSROOT/lib 生成的 GNU ld script 存根
-+# （GROUP libm.so.6 等）解决。bitwuzla 库本体仍静态（libbitwuzla.a），
-+# 仅最终可执行文件为动态链接。
- link_args = []
--if build_static and host_machine.system() != 'darwin'
--  link_args += ['-static']
--endif
- 
- sources = ['main.cpp', 'options.cpp', 'time_limit.cpp']
- 
-diff -ruN '--exclude=.git' -- a/src/meson.build b/src/meson.build
---- a/src/meson.build	2026-08-04 11:51:03.191438141 +0800
-+++ b/src/meson.build	2026-08-03 20:18:11.000000000 +0800
-@@ -6,14 +6,20 @@
- # ---
- 
- # External dependencies
-+# 离线动态构建适配：gmp/mpfr 必须 shared 链接。static: true 时 meson 会在
-+# 可执行文件链接命令中插入 `-static`，使 -lm/-lpthread/-lc 按【静态归档】
-+# 搜索（ld 只找 libm.a/libpthread.a/libc.a，完全忽略 $SYSROOT/lib 下的
-+# .so ld script 存根）。CentOS 7 目标机无 glibc-static，直接报
-+# cannot find -lm/-lpthread/-lc。改 shared 后 -lm 等走动态解析，由
-+# build_all.sh 在 $SYSROOT/lib 生成的 GNU ld script 存根（GROUP libm.so.6 等）解决。
- gmp_dep = dependency('gmp',
-                      version: '>=6.3',
-                      required: true,
--                     static: build_static)
-+                     static: false)
- mpfr_dep = dependency('mpfr',
-                      version: '>=4.2.1',
-                      required: true,
--                     static: build_static)
-+                     static: false)
- 
- # MPFR's .pc has a bare '-lgmp' but no -L for GMP. If GMP is in a separate
- # prefix (e.g. Homebrew), add its libdir so the linker can find libgmp.
-diff -ruN '--exclude=.git' -- a/src/option/option.cpp b/src/option/option.cpp
---- a/src/option/option.cpp	2026-08-04 11:51:03.195438197 +0800
-+++ b/src/option/option.cpp	2026-08-03 05:26:44.000000000 +0800
-@@ -245,14 +245,14 @@
-                 "bv-solver"),
-       sat_solver(this,
-                  Option::SAT_SOLVER,
--#if defined(BZLA_USE_CADICAL)
-+#if defined(BZLA_USE_KISSAT)
-+                 SatSolver::KISSAT,
-+#elif defined(BZLA_USE_CADICAL)
-                  SatSolver::CADICAL,
- #elif defined(BZLA_USE_CMS)
-                  SatSolver::CRYPTOMINISAT,
- #elif defined(BZLA_USE_GIMSATUL)
-                  SatSolver::GIMSATUL,
--#elif defined(BZLA_USE_KISSAT)
--                 SatSolver::KISSAT,
- #else
-                  SatSolver::NONE,
- #endif
-diff -ruN '--exclude=.git' -- a/src/parser/smt2/parser.h b/src/parser/smt2/parser.h
---- a/src/parser/smt2/parser.h	2026-08-04 11:51:03.195438197 +0800
-+++ b/src/parser/smt2/parser.h	2026-08-03 20:13:22.000000000 +0800
-@@ -150,7 +150,10 @@
-       // Look up the symbol via a string_view to avoid a heap-allocated
-       // temporary std::string on every symbol/attribute token.
-       std::string_view symbol = d_lexer->token();
--      SymbolTable::Node* node = d_table.find(symbol);
-+      // find() 需显式构造 std::string（key_type）：transparent 查找依赖
-+      // is_transparent（C++14+），部分编译器/标准下未启用会对
-+      // find(string_view) 报 no matching function。
-+      SymbolTable::Node* node = d_table.find(std::string(symbol));
-       if (!node || is_pending)
-       {
-         node = d_table.insert(
-diff -ruN '--exclude=.git' -- a/src/parser/smt2/symbol_table.cpp b/src/parser/smt2/symbol_table.cpp
---- a/src/parser/smt2/symbol_table.cpp	2026-08-04 11:51:03.195438197 +0800
-+++ b/src/parser/smt2/symbol_table.cpp	2026-08-03 20:13:22.000000000 +0800
-@@ -129,7 +129,9 @@
- SymbolTable::Node*
- SymbolTable::find(std::string_view symbol) const
- {
--  auto it = d_table.find(symbol);
-+  // 显式构造 std::string（key_type）：transparent 查找未启用时
-+  // find(string_view) 会报 no matching function。
-+  auto it = d_table.find(std::string(symbol));
-   if (it == d_table.end())
-   {
-     return nullptr;
-diff -ruN '--exclude=.git' -- a/src/sat/kissat.cpp b/src/sat/kissat.cpp
---- a/src/sat/kissat.cpp	2026-08-04 11:51:03.199438254 +0800
-+++ b/src/sat/kissat.cpp	2026-08-03 05:26:44.000000000 +0800
-@@ -116,11 +116,10 @@
- void
- Kissat::configure_terminator(Terminator* terminator)
- {
--  if (terminator)
--  {
--    throw Unsupported("terminator not supported in Kissat");
--    kissat_set_terminate(d_solver, terminator, kissat_terminate_wrapper);
--  }
-+  kissat_set_terminate(
-+      d_solver,
-+      terminator,
-+      terminator ? kissat_terminate_wrapper : nullptr);
- }
- 
- const char *
-@@ -137,6 +136,9 @@
-     kissat_release(d_solver);
-   }
-   d_solver = kissat_init();
-+  // Equivalent of Kissat's command-line option '--unsat': tune the solver
-+  // towards unsatisfiable instances (required for this project).
-+  kissat_set_configuration(d_solver, "unsat");
-   kissat_set_option(d_solver, "quiet", 1);
-   d_init = false;
- }
-diff -ruN '--exclude=.git' -- a/src/sat/sat_solver_factory.cpp b/src/sat/sat_solver_factory.cpp
---- a/src/sat/sat_solver_factory.cpp	2026-08-04 11:51:03.199438254 +0800
-+++ b/src/sat/sat_solver_factory.cpp	2026-08-03 05:26:44.000000000 +0800
-@@ -84,7 +84,7 @@
- #ifdef BZLA_USE_KISSAT
-   if (d_sat_solver == option::SatSolver::KISSAT)
-   {
--    return false;
-+    return true;
-   }
- #endif
- #ifdef BZLA_USE_CMS
+乘法器被证明等价后，在哪一个阶段被改写，被替换？
+
+
+• 乘法器等价关系被证明后，会在“已证明的算术简化”阶段立即改写，而不是等到最终求解阶段。
+
+  具体流程是：
+
+  1. 在 prove_and_simplify() 中完成两个乘法器输入关系、移位关系、宽度条件及约束安全性证明。src/guarantee.cpp:11250
+  2. 当 rep.proven == true 时选择替换方向：
+      - Op2FromOp1：用宽乘法器结果的切片替换窄乘法器。
+      - Op1FromOp2：用窄乘法器结果扩展、左移后替换宽乘法器。
+
+     src/guarantee.cpp:11264
+
+  3. 随后立即调用 emit_forward_cut() 或 emit_one_cut() 生成改写后的 BTOR2，把被替换乘法器的消费者重定向到保留的乘法器结果。src/guarantee.cpp:11281
+  4. 改写文本马上被重新解析为当前模型，后续候选继续在这个已经简化的模型上证明。src/guarantee.cpp:11318
+  5. prove_and_simplify() 完成后，main.cpp 接收 sr.model_btor2，将其设置为新的 cur，再执行常量传播和 DCE，最终删除已不可达的旧乘法器逻辑。src/main.cpp:2495
+
+  简化为一句话：
+
+  证明等价
+   → 选择安全替换方向
+   → emit_forward_cut / emit_one_cut
+   → 重定向消费者
+   → 重新解析当前模型
+   → 常量传播与 DCE 删除旧乘法器锥
+
+
+› “已证明的算术简化”阶段，整个阶段做了什么事情？用5句话说明清楚
+
+
+• 1. 该阶段先使用约束合法样本，在规格侧与实现侧之间提名可能等价的 add、mul、udiv 和 urem 算术结构。
+  2. 随后按照从浅层到深层的顺序，使用 Bitwuzla、AIG/Kissat 或两者竞速，形式化证明候选的操作数、移位及输出关系。
+  3. 对证明成立且满足位宽、依赖和约束安全条件的候选，程序立即用一侧算术结果替换另一侧，并重定向其消费者。
+  4. 不适合直接替换的已证明变量移位或条件关系会作为约束加入模型，帮助后续候选证明和最终求解。
+  5. 最后，程序对改写后的模型再次执行常量传播和 DCE，删除失效分支及不可达的旧算术逻辑，再交给最终求解器。
+
+
+  stimulus阶段的作用是什么？为什么stimulus结束后直接退出了？
+
+
+• 1. stimulus 阶段是一个独立的测试输入生成工具，用于产生满足 BTOR2 全部 constraint 的合法输入帧，而不是执行性质证明。
+  2. random 模式通过随机仿真反复过滤非法输入，bitwuzla 模式则通过 SMT 求解器直接构造约束合法的输入。
+  4. 当设置 --generate-stimulus 时，程序进入专用分支，该分支明确位于 DCE、约束恢复、乘法器抽象、算术简化和最终求解之前。
+  5. 因为该选项定义的是“只生成输入”的独立工作模式，完成输出后会直接 return 0，避免继续改写模型或求解 bad 性质。
+
+
+
+• --generate-stimulus 模式与主求解流水线在一次 DPV 运行中是彼此独立的，它不会影响后续阶段，因为后续阶段根本不会执行。
+
+  具体关系如下：
+
+  1. --generate-stimulus 是独立工具模式：解析模型后生成满足 constraints 的输入帧，将其写入文件或标准输出，然后直接 return 0。src/main.cpp:962
+  2. 因此，这次运行不会继续执行 DCE、约束恢复、乘法器抽象、已证明的算术简化或最终求解。
+  3. 主流水线中的抽象和算术简化确实也需要 stimulus，但它们会在各自内部重新调用采样函数生成样本，并不使用 --generate-stimulus 分支留下的内存数据。
+  4. 乘法器抽象产生的内部合法样本可以在同一次主流水线运行中传递给算术简化阶段复用，这里的 abstraction_stimulus 才真正影响后续阶段。src/main.cpp:2233
+  5. 独立 stimulus 模式生成的文件只能供用户或外部工具使用；当前代码没有“读取 --stimulus-out 文件并继续求解”的后续接口。
+
+  可以把两者区分为：
+
+  独立 stimulus 模式
+  解析模型 → 生成合法输入 → 输出文件 → return 0
+                                        × 不进入主流水线
+
+  正常主流水线
+  解析 → DCE → 抽象内部采样
+                  ↓ 复用合法样本
+            已证明的算术简化 → 最终求解
+
+  所以，--generate-stimulus 后直接退出并不是“先生成 stimulus 再驱动后续阶段”，而是“只执行 stimulus 生成任务”；真正参与后续阶段的是主流水线内部单独生成和传递的样
+  本。
+
+
+› 真正参与后续阶段的主流水线内部单独生成和传递的样
+    本是在什么阶段使用什么方法策略生成的？
+
+
+• 真正参与后续阶段的样本主要在“乘法器抽象”和“已证明的算术简化”两个阶段生成，并沿主流水线在内存中传递。
+
+  1. 乘法器抽象阶段生成第一批样本
+
+  在 find_mul_abstractions() 中，如果启用了 SCA，程序调用：
+
+  sample_constraint_legal(model, options)
+
+  Bitwuzla 会把所有 BTOR2 constraints 合取起来，通过 SMT 求解生成合法输入赋值。src/abstraction.cpp:1272
+
+  生成策略包括：
+
+  - 随机目标 steering，使解偏向不同输入值。
+  - 每找到一个解便加入 blocking constraint，要求下一个输入赋值与已有赋值不同。
+  - 不参与 constraints 的自由输入直接填充随机值。
+  - 受 --abstract-patterns 和 --abstract-sample-timeout 控制。
+
+  2. 对未被激活的乘法器定向补样
+
+  普通合法样本可能只改变模式位，而乘法器操作数始终不变，因此抽象阶段会检查乘法器输出和操作数值列是否具有足够多的不同值。
+
+  如果某个乘法器没有被真正激活，就调用：
+
+  steer_at_dead_muls(...)
+
+  它使用 SMT 偏置求解，主动让该乘法器的操作数取不同值，然后把得到的合法样本加入原样本集合并重新仿真。src/abstraction.cpp:1366
+
+  3. 抽象阶段如何使用这些样本
+
+  这些样本会在完整模型上求值，为每个节点形成跨样本的“值列”和行为指纹，用于发现：
+
+  规格乘法器 M
+      ↕ 固定或变量移位关系
+  RTL 侧候选输出 S
+
+  它们还用于匹配 RTL 侧的字级操作数、位级操作数片段和变量移位关系，但只负责提名候选，不构成形式证明。src/abstraction.cpp:1312
+
+  4. 抽象样本传递给算术简化阶段
+
+  当 SCA 和后续算术简化都启用时，抽象阶段设置：
+
+  ao.retain_stimulus = true;
+
+  find_mul_abstractions() 将合法 assignments 放入：
+
+  AbstractionStats::stimulus_assignments
+
+  随后 main.cpp 将其移动到：
+
+  abstraction_stimulus
+
+  src/main.cpp:1303
+
+  进入算术简化前，这些样本被传给：
+
+  simplify_equiv.initial_assignments = &abstraction_stimulus;
+
+  从而避免再次为相同约束区域执行 SMT 采样。src/main.cpp:2233
+
+  5. 算术简化阶段也可以自行生成样本
+
+  如果没有可复用的抽象样本，或者样本不兼容，find_equivalent_pairs() 会再次调用：
+
+  sample_constraint_legal(model, options)
+
+  生成满足 constraints 的合法样本，并同样通过 steer_at_dead_muls() 补充未激活的乘法器。src/analysis.cpp:257
+
+  这些样本用于提名 mul、udiv 和 urem 的固定移位、切片及变量移位候选。
+
+  6. 候选发现样本继续传入正式证明阶段
+
+  find_equivalent_pairs() 返回时把样本保存在：
+
+  EquivResult::assignments
+
+  main.cpp 再将它们转移到：
+
+  gopt.inference_assignments = std::move(eq.assignments);
+
+  最后交给 prove_and_simplify() 推断两个算术节点的操作数对应方式、是否交换以及移位关系。src/main.cpp:2305
+
+  完整数据流是：
+
+  乘法器抽象阶段
+      │
+      ├─ Bitwuzla constraint-legal sampling
+      ├─ blocking 保证输入不同
+      ├─ 随机目标 steering
+      └─ dead-mul operand steering
+               │
+               ▼
+  abstraction_stimulus
+               │
+               ▼
+  find_equivalent_pairs
+      │
+      ├─ 优先复用抽象样本
+      └─ 不足时重新 SMT 采样和定向补样
+               │
+               ▼
+  EquivResult::assignments
+               │
+               ▼
+  GuaranteeOptions::inference_assignments
+               │
+               ▼
+  prove_and_simplify
+      ├─ 推断操作数对应及移位
+      ├─ 提名算术关系
+      └─ 独立形式证明后才允许改写
+
+  因此，主流水线的样本策略可以概括为：约束合法 SMT 采样作为基础，blocking 提供差异性，随机目标 steering 增加多样性，dead-mul steering 激活稀有乘法路径，并在抽象与
+  算术简化之间复用已有样本。
