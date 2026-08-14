@@ -1,190 +1,524 @@
-乘法器被证明等价后，在哪一个阶段被改写，被替换？
+# BUTTRESS：通过已证明的带守卫引理收敛困难 datapath 等价性证明
 
+> 说明：本版本已将所有公式块转换为普通 Markdown / Unicode 文本公式，避免出现渲染不兼容的 LaTeX 标记。
 
-• 乘法器等价关系被证明后，会在“已证明的算术简化”阶段立即改写，而不是等到最终求解阶段。
+## 摘要
 
-  具体流程是：
+Datapath 等价性检查经常需要关联两个通过结构上显著不同的逻辑来计算相同函数的设计，例如 C-to-RTL verification 中的情形。在这类 miter 上，monolithic SMT solving 会停滞，而基于 sweeping 的方法只有在内部节点无条件等价时才有帮助。然而，真实设计往往只在控制条件下、并且跨不匹配的位宽来关联其中间算术结果——这类对应关系无法由任何 cut-point merge 表达。
 
-  1. 在 prove_and_simplify() 中完成两个乘法器输入关系、移位关系、宽度条件及约束安全性证明。src/guarantee.cpp:11250
-  2. 当 rep.proven == true 时选择替换方向：
-      - Op2FromOp1：用宽乘法器结果的切片替换窄乘法器。
-      - Op1FromOp2：用窄乘法器结果扩展、左移后替换宽乘法器。
+本文提出 **BUTTRESS**，一种完全自动化的流程，通过已证明的 **guarded lemmas** 来收敛这类证明。Constraint-legal simulation 会提名两个 miter 侧之间的候选关系，包括位宽变化、移位以及 ITE-guarded 的形式；每个候选都由 UNSAT proof 证明，而绝不由 sampling 授权。无条件证明的关系会成为 verified cuts；带守卫的关系会作为 model constraints 注入，从而在不重写 miter 的情况下对其进行 sound strengthening。Lemmas 按照从输入到 property 的 logic-level 顺序调度，因此每个证明都会受益于先前已经建立的所有 lemmas。
 
-     src/guarantee.cpp:11264
+在来自 35 个工业 GPU-shader miters 的 685 个 properties 上，BUTTRESS 全部判定完成（186 个 SAT，499 个 UNSAT），而 state-of-the-art word-level solving 仍留下 `[N]` 个 unresolved；在由 30 个流行 CPU、FPU 和 accelerator 设计构成的开源套件上，BUTTRESS `[解决了 17 个击败 state-of-the-art open flow 的 pair 中的 [K] 个]`。
 
-  3. 随后立即调用 emit_forward_cut() 或 emit_one_cut() 生成改写后的 BTOR2，把被替换乘法器的消费者重定向到保留的乘法器结果。src/guarantee.cpp:11281
-  4. 改写文本马上被重新解析为当前模型，后续候选继续在这个已经简化的模型上证明。src/guarantee.cpp:11318
-  5. prove_and_simplify() 完成后，main.cpp 接收 sr.model_btor2，将其设置为新的 cur，再执行常量传播和 DCE，最终删除已不可达的旧乘法器逻辑。src/main.cpp:2495
+---
 
-  简化为一句话：
+## I. 引言
 
-  证明等价
-   → 选择安全替换方向
-   → emit_forward_cut / emit_one_cut
-   → 重定向消费者
-   → 重新解析当前模型
-   → 常量传播与 DCE 删除旧乘法器锥
+GPU、DSP 和 AI accelerator 中的算术 datapaths 被不断优化：operand widths 被缩窄，multiplication 被移位和共享，division 被降低为 reciprocal networks，完整的 arithmetic stages 会被 control 旁路。正确性通常通过与 trusted reference 的等价性检查来建立——reference 可以是先前的 RTL revision，也可以是 high-level specification，如 C-to-RTL verification [1], [2] 中的情形——最终形成一个 miter，其中两个设计通过结构不同的逻辑计算相同函数。
 
+正是这种结构差异击败了当今的自动化引擎。Monolithic solving——将整个 miter 交给 word-level SMT solver [3]，或者 bit-blasting 到 SAT [4]——一旦宽 multiplier、division 和 data-dependent control 相互作用就会停滞。Sweeping [5], [6]，包括最近的 word-level engines [7]，会合并内部 node pairs，但 merge 只有对无条件等价的 pairs 才是 sound 的；e-graph rewriting assistants [8] 最终也必须在语法上重新连接两个设计。在工业实践中，剩余距离通常由人工覆盖：工程师编写 helper lemmas 和 case splits，直到工具收敛 [9]——这是一个昂贵、设计特定且不可重复的循环。
 
-› “已证明的算术简化”阶段，整个阶段做了什么事情？用5句话说明清楚
+我们观察到，其根本原因在于现有引擎可利用的内容与真实 datapath 所提供的内容之间存在不匹配。优化后的 implementation 很少与 reference 无条件一致：只有在 bypass control inactive 时，specification product 才等于 implementation product 的 shifted zero-extension；adder state 会分散在 masked multiplexer arms 中；division 可能只在一侧以 reciprocal network 的形式存在。此类关系在一个 guard 下成立，跨越不匹配位宽，并带有 shift——对于任何唯一操作是合并两个相等节点的技术而言都是不可见的。
 
+我们的关键 insight 是：guarded correspondences 不需要通过 merge 才有用；一旦形式化证明，它们就可以作为 constraints 注入到 miter 中。电路从不被重写，模型只被加强，因此 soundness 是直接的。人工 helper lemmas 依靠人类洞察实现的效果，可以由 constraint injection 机械化实现——前提是回答两个问题：候选关系从何而来？它们应按什么顺序证明？
 
-• 1. 该阶段先使用约束合法样本，在规格侧与实现侧之间提名可能等价的 add、mul、udiv 和 urem 算术结构。
-  2. 随后按照从浅层到深层的顺序，使用 Bitwuzla、AIG/Kissat 或两者竞速，形式化证明候选的操作数、移位及输出关系。
-  3. 对证明成立且满足位宽、依赖和约束安全条件的候选，程序立即用一侧算术结果替换另一侧，并重定向其消费者。
-  4. 不适合直接替换的已证明变量移位或条件关系会作为约束加入模型，帮助后续候选证明和最终求解。
-  5. 最后，程序对改写后的模型再次执行常量传播和 DCE，删除失效分支及不可达的旧算术逻辑，再交给最终求解器。
+我们用 **BUTTRESS** 回答这两个问题。BUTTRESS 是一个面向 BTOR2 [10] 中 word-level / bit-level hybrid miters 的完全自动化流程。Constraint-legal simulation 会提名跨侧关系，覆盖 add、mul、udiv 和 urem——包括 width-changing、shifted 和 ITE-guarded forms——但它永远不会授权任何候选：每个候选都必须由 UNSAT proof discharge，SAT 或 UNKNOWN 结果会被丢弃。无条件关系成为 verified cuts，用于缩小 miter；guarded relations 作为 constraints 注入以加强 miter。候选按从输入到 property 的 logic level 调度，并且在每个 accepted lemma 之后重建模型，因此每个 obligation 和最终的 backend-agnostic solve 都能受益于之前证明的所有内容。
 
+本文贡献如下：
 
-  stimulus阶段的作用是什么？为什么stimulus结束后直接退出了？
+- **Guarded lemmas as constraints。** 将形式化证明的 conditional、width-changing 和 shifted correspondences 作为 model constraints 注入，将 equivalence checking 扩展到无条件 cut-point merging 之外，并且 soundness 由构造保证。
+- **Proof-licensed discovery。** Constraint-legal simulation 提出候选，包括从 ITE / masked-mux control frontiers 重构的 arithmetic states，以及从 reciprocal-style networks 恢复的 divisions；只有 exact identities 和 UNSAT proofs 才授权使用这些候选。
+- **Progressive lemma scheduling。** 一种 logic-level-ordered scheduler，先证明 shallow relations，在每个 accepted lemma 后重建，用 short proof budgets 筛选 candidates，并自适应地将剩余 budget 集中到最终且最困难的 correspondence 上。
+- **在工业和开源电路上的评估。** BUTTRESS 判定 35 个工业 GPU-shader miters 的全部 685 个 properties，并解决 `[K of 17]` 个击败 existing flows 的开源 pairs。
 
+---
 
-• 1. stimulus 阶段是一个独立的测试输入生成工具，用于产生满足 BTOR2 全部 constraint 的合法输入帧，而不是执行性质证明。
-  2. random 模式通过随机仿真反复过滤非法输入，bitwuzla 模式则通过 SMT 求解器直接构造约束合法的输入。
-  4. 当设置 --generate-stimulus 时，程序进入专用分支，该分支明确位于 DCE、约束恢复、乘法器抽象、算术简化和最终求解之前。
-  5. 因为该选项定义的是“只生成输入”的独立工作模式，完成输出后会直接 return 0，避免继续改写模型或求解 bad 性质。
+## II. 动机示例与问题陈述
 
+### A. 优化 Datapaths 中的 Guarded Correspondences
 
+考虑一个 floating-point multiply datapath 与其 high-level reference 的等价性检查。Specification 以自然位宽乘以 significands，并扩展 implicit leading bit：binary32 datapath 从两个 24-bit significands 计算 48-bit product：
 
-• --generate-stimulus 模式与主求解流水线在一次 DPV 运行中是彼此独立的，它不会影响后续阶段，因为后续阶段根本不会执行。
 
-  具体关系如下：
+公式：`P_spec = A · B`
 
-  1. --generate-stimulus 是独立工具模式：解析模型后生成满足 constraints 的输入帧，将其写入文件或标准输出，然后直接 return 0。src/main.cpp:962
-  2. 因此，这次运行不会继续执行 DCE、约束恢复、乘法器抽象、已证明的算术简化或最终求解。
-  3. 主流水线中的抽象和算术简化确实也需要 stimulus，但它们会在各自内部重新调用采样函数生成样本，并不使用 --generate-stimulus 分支留下的内存数据。
-  4. 乘法器抽象产生的内部合法样本可以在同一次主流水线运行中传递给算术简化阶段复用，这里的 abstraction_stimulus 才真正影响后续阶段。src/main.cpp:2233
-  5. 独立 stimulus 模式生成的文件只能供用户或外部工具使用；当前代码没有“读取 --stimulus-out 文件并继续求解”的后续接口。
 
-  可以把两者区分为：
+implementation 有三点不同，这些都是 optimized RTL 中常见的做法：
 
-  独立 stimulus 模式
-  解析模型 → 生成合法输入 → 输出文件 → return 0
-                                        × 不进入主流水线
+1. **Exceptional bypass。** 对于 zero、infinity 和 NaN operands，mantissa datapath 会被一个 multiplexer 旁路，选择 canned result；在这些输入下，两个 datapaths 按设计会携带无关值。
+2. **Subnormal pre-normalization。** Subnormal operand 在进入 multiplier 前会通过 data-dependent left shift 进行 normalized，其移位范围覆盖整个 fraction width。
+3. **Width reduction。** Implementation multiplier 更窄；specification result 从其 product 的一个 slice 与一次 shift 重新组装。
 
-  正常主流水线
-  解析 → DCE → 抽象内部采样
-                  ↓ 复用合法样本
-            已证明的算术简化 → 最终求解
+如 Figure 1 所示，两个 multipliers 之间的自然对应关系因此并不是两个节点的相等，而是一个 guarded、width-changing、shifted relation。令 `G` 为 operands 有限且非零的谓词，`s,t` 为 pre-normalization shifts，则有：
 
-  所以，--generate-stimulus 后直接退出并不是“先生成 stimulus 再驱动后续阶段”，而是“只执行 stimulus 生成任务”；真正参与后续阶段的是主流水线内部单独生成和传递的样
-  本。
 
+公式 (1)：`G → A · B = zext_k(a · b) ≪ (s + t)`
 
-› 真正参与后续阶段的主流水线内部单独生成和传递的样
-    本是在什么阶段使用什么方法策略生成的？
 
+其中 `zext_k(·)` 将 narrow product zero-extend 到 specification width `k`。Equation (1) 的每个组成部分都会击败 cut-point engine：该关系是 conditional 的（在 bypassed inputs 上为 false），位宽不同（nodes 类型不兼容），alignment 是 data-dependent 的（不存在一个单独 rewrite 可对齐结构）。相反，monolithic solver 必须在包含两个 multipliers 的指数级 search space 中隐式重新发现 Equation (1)。这不是假设：对于 Figure 1 的 binary32 instance（从工业 floating-point multiply-add unit 导出），Bitwuzla [3]——当前 SMT-COMP quantifier-free bit-vector (QF_BV) track 的 state of the art——在 `[2]` 小时内没有取得进展；bit-blasting 到 SAT solver Kissat [4] 也没有更好；`[并且商业 equivalence checker 只有在工程师编写 helper lemmas 后才收敛]`。在这里，每种已有的自动 route 实际上都无用。
 
-• 真正参与后续阶段的样本主要在“乘法器抽象”和“已证明的算术简化”两个阶段生成，并沿主流水线在内存中传递。
+这并非 floating point 特有。在 GPU shader 的 texture-addressing logic 中，reference 沿着 mip chain 向下遍历，并把每一层大小累加进 base address：
 
-  1. 乘法器抽象阶段生成第一批样本
+```c
+while (level-- > 0) addr += mip_size(level);
+```
 
-  在 find_mul_abstractions() 中，如果启用了 SCA，程序调用：
+而 optimized implementation 会把这个 walk 折叠成一个由 `level` 计算得到的 closed form，该 closed form 通过 scaled product 与 shifts 计算。partial sums 与 one-shot product 之间的 correspondence 同样由 walk being active 来 guard，跨越位宽，并依赖 `level` 做 alignment。凡是 implementation collapse、bypass 或 re-time reference arithmetic 的地方，都会出现这种 correspondences；它们是 hard datapath equivalence problems 的常见基础。
 
-  sample_constraint_legal(model, options)
+类似 Equation (1) 的 relations 正是 verification engineer 会手写的 “helper lemmas”，以便让工业工具收敛。本文目标是自动发现、证明并利用它们。
 
-  Bitwuzla 会把所有 BTOR2 constraints 合取起来，通过 SMT 求解生成合法输入赋值。src/abstraction.cpp:1272
+#### Figure 1. Mantissa multiplication miter
 
-  生成策略包括：
+Mantissa multiplication miter。`A · B` 与 `a · b` 之间的自然 correspondence 不是一个有效 cut point：它只在 bypass 之外成立 (i)，跨越不匹配位宽 (ii)，并且取决于 data-dependent alignment (iii)，因此 unconditional cut-point merging 无法简化该 miter。
 
-  - 随机目标 steering，使解偏向不同输入值。
-  - 每找到一个解便加入 blocking constraint，要求下一个输入赋值与已有赋值不同。
-  - 不参与 constraints 的自由输入直接填充随机值。
-  - 受 --abstract-patterns 和 --abstract-sample-timeout 控制。
+图中标注包括：
 
-  2. 对未被激活的乘法器定向补样
+- `b : P_spec ≠ P_impl`
+- specification cone：`A · B`，48-bit，`A`，`B`
+- implementation cone：`ite`，canned result，`a · b` narrow，`a`，`b`，`≪ nrm`
+- `cls FP source (e || f)`，`e, f`，`bypass ctrl`
+- (i) conditional only：bypassed 时为 unrelated values
+- (ii) width mismatch：没有 type-compatible node pair
+- (iii) data-dependent alignment `s+t`：subnormal normalization
 
-  普通合法样本可能只改变模式位，而乘法器操作数始终不变，因此抽象阶段会检查乘法器输出和操作数值列是否具有足够多的不同值。
+### B. 问题陈述
 
-  如果某个乘法器没有被真正激活，就调用：
+**Definition 1（Miter model）。** 一个 miter model 是一个 tuple：
 
-  steer_at_dead_muls(...)
 
-  它使用 SMT 偏置求解，主动让该乘法器的操作数取不同值，然后把得到的合法样本加入原样本集合并重新仿真。src/abstraction.cpp:1366
+公式：`M = (X, D, C, b)`
 
-  3. 抽象阶段如何使用这些样本
 
-  这些样本会在完整模型上求值，为每个节点形成跨样本的“值列”和行为指纹，用于发现：
+其中：
 
-  规格乘法器 M
-      ↕ 固定或变量移位关系
-  RTL 侧候选输出 S
+- `X` 是 bit-vector inputs 的集合；
+- `D` 是 bit-vector definitions 的无环集合，即 `X` 上的 combinational BTOR2 netlist；
+- `C` 是 single-bit constraints 的集合；
+- `b` 是 single-bit selected bad。
 
-  它们还用于匹配 RTL 侧的字级操作数、位级操作数片段和变量移位关系，但只负责提名候选，不构成形式证明。src/abstraction.cpp:1312
+若一个 assignment `σ` 满足：
 
-  4. 抽象样本传递给算术简化阶段
 
-  当 SCA 和后续算术简化都启用时，抽象阶段设置：
+公式：`σ ⊨ D ∧ ⋀C`
 
-  ao.retain_stimulus = true;
 
-  find_mul_abstractions() 将合法 assignments 放入：
+则 `σ` 是 legal 的；问题是判定是否存在某个 legal `σ` 满足 `b`（SAT，表示真实 counterexample），或者不存在这样的 `σ`（UNSAT）。
 
-  AbstractionStats::stimulus_assignments
+在 C-to-RTL flows 中，`M` 按 property 导出：`b` 比较两侧输出，`C` 编码 legal input space 和 active case split。Sequential behavior 在导出前被解析——遵循 C-to-RTL practice，transaction phases 被显式指定，registered logic 跨 phases unrolled——因此 `M` 是 purely combinational。我们写 `C ⊨ φ` 表示：
 
-  随后 main.cpp 将其移动到：
 
-  abstraction_stimulus
+公式：`D ∧ ⋀C ∧ ¬φ`
 
-  src/main.cpp:1303
 
-  进入算术简化前，这些样本被传给：
+不可满足。
 
-  simplify_equiv.initial_assignments = &abstraction_stimulus;
+**Definition 2（Proven lemma）。** 若 `M` 的节点上的 single-bit formula `φ` 满足 `C ⊨ φ`，并且该结论由 trusted solver 的 UNSAT 结果或 exact algebraic identity 建立，则 `φ` 是一个 proven lemma。
 
-  从而避免再次为相同约束区域执行 SMT 采样。src/main.cpp:2233
+两个要求塑造了解空间：
 
-  5. 算术简化阶段也可以自行生成样本
+- **soundness**：flow 不能改变 `M` 的 verdict，并且任何 transformation 都不能由 simulation 或 SAT / UNKNOWN auxiliary result 证明；
+- **automation**：没有 signal names 或 user-supplied assertions 可用，因此每个 lemma 都必须仅从 miter 自身发现并证明。
 
-  如果没有可复用的抽象样本，或者样本不兼容，find_equivalent_pairs() 会再次调用：
+---
 
-  sample_constraint_legal(model, options)
+## III. BUTTRESS 方法
 
-  生成满足 constraints 的合法样本，并同样通过 steer_at_dead_muls() 补充未激活的乘法器。src/analysis.cpp:257
+### A. Flow Overview and Soundness Rules
 
-  这些样本用于提名 mul、udiv 和 urem 的固定移位、切片及变量移位候选。
+Figure 2 展示了 flow。BUTTRESS：
 
-  6. 候选发现样本继续传入正式证明阶段
+1. 通过 constraint-legal simulation 反复提名 candidate cross-side relations，并通过 proof discharge 它们，把每个已证明关系作为 cut 或 injected constraint 应用；
+2. 将 strengthened、simplified miter 交给 final solve。
 
-  find_equivalent_pairs() 返回时把样本保存在：
+每个 intermediate obligation——lemma、cut 或 side condition——都由 word-level SMT solver Bitwuzla [3] discharge；final solve 是 backend-agnostic 的，因为任何 sound solver 都会受益于 strengthened model。
 
-  EquivResult::assignments
+#### 1) Nomination versus license
 
-  main.cpp 再将它们转移到：
+所有 discovery 都运行在 constraint-legal stimuli 上：这些 legal assignments 从 solver 获得，通过 randomized assumptions 和 solution blocking 做多样化。匹配的 value fingerprints（可能位于一个 width adapter 下，见下文）会提名 candidate relation；nomination 是 sampling 唯一的作用：
 
-  gopt.inference_assignments = std::move(eq.assignments);
+- **R1**：只有 exact algebraic identity 或 UNSAT proof 后，才会应用 rewrite 或 constraint；SAT 和 UNKNOWN 永远不会授权任何操作。
+- **R2**：一个 unconditional proven equality 可以作为 verified cut 应用（Definition 3），但要满足 structural safety checks。
+- **R3**：一个 guarded proven relation 只能作为 constraint 注入；它永远不会 redirect consumer。
+- **R4**：任何 constraint 的 fanin 中的 nodes 都会受到保护，不允许 redirection；并且在任何 forward cut 之前都会检查 acyclicity。
 
-  最后交给 prove_and_simplify() 推断两个算术节点的操作数对应方式、是否交换以及移位关系。src/main.cpp:2305
+#### 2) Width adapters
 
-  完整数据流是：
+因为两侧以不同位宽计算，relations 通过一个 adapter `ρ` 来表达（slices、zero/sign extensions、shifts），其 exactness 会 bit-precisely 检查：
 
-  乘法器抽象阶段
-      │
-      ├─ Bitwuzla constraint-legal sampling
-      ├─ blocking 保证输入不同
-      ├─ 随机目标 steering
-      └─ dead-mul operand steering
-               │
-               ▼
-  abstraction_stimulus
-               │
-               ▼
-  find_equivalent_pairs
-      │
-      ├─ 优先复用抽象样本
-      └─ 不足时重新 SMT 采样和定向补样
-               │
-               ▼
-  EquivResult::assignments
-               │
-               ▼
-  GuaranteeOptions::inference_assignments
-               │
-               ▼
-  prove_and_simplify
-      ├─ 推断操作数对应及移位
-      ├─ 提名算术关系
-      └─ 独立形式证明后才允许改写
 
-  因此，主流水线的样本策略可以概括为：约束合法 SMT 采样作为基础，blocking 提供差异性，随机目标 steering 增加多样性，dead-mul steering 激活稀有乘法路径，并在抽象与
-  算术简化之间复用已有样本。
+公式 (2)：`ρ(x) ::= x | x[h:l] | zext_k(x) | sext_k(x) | ρ(x) ≪ c.`
+
+
+**Definition 3（Verified cut）。** 令 `u,v` 为 nodes，并且对于 adapter `ρ` 有：
+
+
+公式：`C ⊨ u = ρ(v)`
+
+
+则 verified cut 会将 `u` 的每个 consumer 替换为 `ρ(v)`，前提是 `u` 不 feeding 任何 constraint，并且该 replacement 保持 acyclicity。
+
+**Theorem 1（Soundness）。** 令 `M'` 由 `M` 通过如下方式获得：
+
+1. 将 proven lemmas `φ_1, …, φ_n` 作为 constraints 注入；
+2. 应用 verified cuts。
+
+则 `M'` SAT 当且仅当 `M` SAT，并且 `M'` 的每个 satisfying assignment 也是 `M` 的 satisfying assignment。
+
+**Proof sketch。** 对于 (a)，每个 legal `σ` 都满足每个 `φ_i`（Definition 2），因此 conjoining `φ_i` 既不改变 legal set，也不改变 `b` 的 satisfiability。对于 (b)，`C ⊨ u = ρ(v)` 使 redirection 成为 legal inputs 上的 semantic identity，而 R4 checks 保持模型 well-formed。对 applied sequence 做归纳即可完成证明，每一步都看到 accumulated constraints。
+
+R2 与 R3 之间的 asymmetry 是该方法的核心，Figure 2 中的两个 action boxes 体现了这一点：cut 会 redirect consumer edges，而 injection 会添加一个 constraint root，并且不触碰任何 circuit edge（Figure 3 展示了图上的一个 injection）。像 Equation (1) 这样的 guarded relation 在 guard 之外为 false，因此 merge 是 unsound 的——这正是 sweeping-based methods 停止的地方。Injection 避免了这一困境：miter 被加强，而不是被重写，并且 final solver 仅在 lemma 适用处使用它。
+
+#### Figure 2. BUTTRESS flow
+
+BUTTRESS flow，带有 Section III-A 的 soundness rules 标注。Sampling 只提名 candidate relation `r`，只有 Bitwuzla UNSAT proof 才会授权它（R1）：unconditional relations 成为 verified cuts（R2，受 R4 safety checks 约束），guarded relations 作为 constraints 注入（R3）。每个 accepted lemma 对所有后续 proofs 和最终 backend-agnostic solve 都可见。
+
+图中流程包括：
+
+- 输入：BTOR2 miter `(X,D,C,b)`
+- Buttress progressive guarded-lemma engine：
+  - constraint-legal sampling + fingerprints
+  - pattern templates：add & control frontier、fixed/variable-shift mul、derived-guard mul、div
+  - level-ordered queue `Q`：按 `ℓ` 从 shallow 到 deep
+  - proof：`prove r (Bitwuzla)`，screen `τ_s`
+  - UNSAT 且 unconditional：verified cut，fold & remap
+  - UNSAT 且 guarded：inject lemma，`C ← C ∪ {r}`
+  - UNKNOWN：retry queue（depth-rounded）
+  - SAT：discard
+- final solve：backend solver，SAT / UNSAT
+
+#### 3) Constraint-Legal Simulation
+
+`[Placeholder: we need to state that BUTTRESS conduct a COVER-based method to generate legal simulation, and is different from what have been done in FORWORD.]`
+
+译注：原文此处为占位符，说明作者计划补充：BUTTRESS 使用一种 COVER-based 方法生成 legal simulation，并说明它与 FORWORD 中已有方法的不同。
+
+### B. Guarded Lemma Patterns
+
+所有 patterns 共享 Section III-A 的 discovery pipeline；每个 subsection 只说明提名什么以及必须证明什么。Table I 给出概览。
+
+#### Table I. Guarded lemma patterns
+
+所有 proofs 都是在 `C` 下的 UNSAT checks。
+
+| Pattern | Guard | Width / shift | Applied as |
+|---|---|---|---|
+| control-light add | none | Equation (2) 的 `ρ` | cut |
+| add / control frontier | control polarity | fixed / finite shifts | constraint |
+| fixed-shift mul | none | proven operand shifts | cut |
+| variable-shift mul | none | carrier-backed shifts | cut / constraint |
+| derived-guard mul | domain predicate | proven finite shift sets | constraint |
+| udiv / urem recovery | divisor domain | narrowing | cut / constraint |
+
+#### 1) Addition and the Control Frontier
+
+当一个 add 的 local fanin 不包含显著 ITE 或 masked control join 时，它是 **control-light** 的。对于这类 adds，sampled fingerprints 会提名 opposite-side node `v`，使得：
+
+
+公式：`u = ρ(v)`
+
+
+直接 UNSAT proof 会授权一个 cut（R2）。Width mismatch 是常态：被证明的 relation 经常是：
+
+
+公式：`u = zext_k(v) ≪ c`
+
+
+或者 output slice。
+
+然而，control-heavy datapaths 会把一个 semantic addition 分散到一个 control frontier 上：add state 只作为 literal ITE、masked AND arms 的 OR，或者通过任一形式选择的 add output 出现——如 Section II-A 的 bypass network。只有完整的 add-state join 才是 candidate boundary；partial mux arm 永远不是。当 relation 只在 control 下成立时，BUTTRESS 构造一个 guarded lemma：
+
+
+公式 (3)：`(c = p) → u_spec = ρ(u_impl)`
+
+
+其中 guard `c` 来自 arithmetic fanin 中的 comparison 和 control nodes，它的 active polarity `p` 从 legal samples 提名；当两侧都暴露 controls 时，首先证明它们的 equivalence：
+
+
+公式：`c_spec = c_impl`
+
+
+Equation (3) 的每个实例都被证明为 UNSAT 并注入（R3）：inactive arms 可能携带无关值，所以它刻意不进行 merge。
+
+#### 2) Multiplication Correspondences
+
+##### a) Fixed shift
+
+对于被提名的 cross-side pair of multipliers，BUTTRESS 推断 aligned 或 crossed operand matching，并证明两个 input relations：
+
+
+公式 (4)：`A = zext(a) ≪ s_a, ； B = zext(b) ≪ s_b.`
+
+
+Output equality 不是前提：一旦 Equation (4) 被证明，shifts 和 widths 就决定了 exact product slice，cut 可以保留任一侧——即保留 wide product，并为 narrow consumer 做 slicing；或者，当 high-zero proofs 表明 narrow result 完整时，保留 narrow product 并加上 shifted zero-extension。
+
+##### b) Variable shift
+
+当 sampled shift 变化时，BUTTRESS 首先识别一个 **carrier**：一个现有 node，其值就是 shift amount。两个 carrier-based input relations 都会被证明并注入。一个 structural cut 还需要证明 side conditions：
+
+- 每个 data-dependent shift 都有真实 carrier；
+- product exactness：
+
+
+公式 (5)：`ew(a) + ew(b) ≤ w(a · b)`
+
+
+其中 `ew(·)` 是 proven effective width；
+
+- target 的 fanout 中没有 constraint；
+- source 和 carriers 独立于 target；
+- replacement 会连续应用两个已证明 shifts，以避免 wrapped `s_a + s_b`。
+
+如果任何 condition 失败，该 relation 仅保留为 lemma-only：被注入，但绝不 redirect。
+
+#### 3) Derived-Guard Multiplication Lemmas
+
+一个 guard 不必作为 control node 预先存在：它可以从 data domain 中导出，然后被证明。BUTTRESS 执行以下步骤：
+
+1. 对一个由两个 operand cones 共享的 data source 上的 candidate guard predicates 进行 parameterize；
+2. 在 `C` 下证明 operand implications：
+
+
+公式：`G → A = zext(a) ≪ s`
+
+
+以及：
+
+
+公式：`G → B = zext(b) ≪ t`
+
+
+每个 implication 都会被注入，使第二个 proof 能看到第一个；
+
+3. 一旦 Equation (5) 的 exactness condition 成立，就通过 distributivity 推导 output lemma：
+
+
+公式 (6)：
+
+- 前提：`G → A = a ≪ s`；`G → B = b ≪ t`；`ew(a) + ew(b) ≤ w(ab)`。
+- 结论：`G → A · B = zext(a · b) ≪ (s + t)`。
+
+
+当 proven shift sets 不是 singletons 时，shift 会遍历 pairwise sums。根据 R3，Equation (6) 保持为 constraint，因为 bad 仍可能遍历 excluded domain。
+
+Section II-A 的 mantissa miter 实例化了该 recipe（Figure 3）：guards 是从 shared FP source 的 exponent `e` 和 fraction `f` bits parameterize 出来的 operand classes，例如：
+
+
+公式：`norm ≡ e ≠ 0 ∧ e ≠ 1^w_e`
+
+
+以及：
+
+
+公式：`sub ≡ e = 0 ∧ f ≠ 0`
+
+
+其中 zero、infinity 和 NaN 由 construction 排除。Normal operands 使用 shift set `{0}`；subnormal operands 使用完整范围 `{1, …, w_f}`——sampled subset 绝不会被假设为完整。这没有任何其他 FP-specific 之处：任何 shared source 上可证明的 domain predicate 都可作为 `G`。
+
+#### Figure 3. Derived-guard multiplication recipe
+
+Derived-guard multiplication recipe，实例化在 Section II-A 的 mantissa miter 上。虚线红边是 proven relations；双边框节点是 injected constraint（R3）。Guard `G` 从两个 operand cones 共享的 data source parameterize 并证明；两个 operand relations 在 `G` 下被证明并注入；然后通过 distributivity（Equation (6)）得到加入 `C` 的 guarded output lemma；没有 circuit edge 被重写。
+
+图中包括：
+
+- spec cone：`A`、`B`、`A · B`
+- impl cone：`a`、`b`、`a · b`、`≪ nrm`
+- FP source `(e | f)`、`e,f`、`norm | sub`
+- `G → A = zext(a) ≪ s`
+- `G → B = zext(b) ≪ t`
+- `G → A · B = zext(a · b) ≪ (s+t)`
+- inject: `C ∪ {·}`
+
+#### 4) Division and Remainder Recovery
+
+Implementation side 往往完全不包含 `udiv` 或 `urem` node：division 通过 reciprocal multiplication、shift networks 或 decoder envelopes 实现。因此，BUTTRESS 会在 specification division 与普通 implementation node 之间提名 output relations，并 discharge 一个 proof chain：
+
+- numerator high-zero narrowing；
+- 当 `udiv` semantics 需要时，证明 divisor-nonzero；
+- 当 denominator samples 为 constant 时，在任何 exact lowering（power-of-two shifts、exact reciprocal multiplication、shift-add constant products）之前，证明它是 constant 或位于一个 proven finite set 中：
+
+
+公式：`C ⊨ d ∈ {d_1, …, d_m}`
+
+
+feeding constraint 的 nodes 永远不会被重写（R4）。Division discovery 会在 shallower add 和 mul cuts 之后重试，这些 cuts 经常会缩小它必须寻找的 correspondence。
+
+### C. Progressive Scheduling and Final Solving
+
+Lemmas 并不是相互独立的：cone 深处的一个 proof 之所以可行，恰恰是因为 shallow lemmas 已经建立。BUTTRESS 因此按从 inputs 到 bad 的 logic level `ℓ(·)` 排序所有 candidates，并维持一个 invariant：每个 discharged obligation 都能看到之前所有 accepted lemmas（Algorithm 1）。
+
+实践中有三个 refinements 很重要：
+
+- **Short screens。** Shallow candidates 获得一个小 budget `τ_s`；SAT 会廉价地丢弃 false nomination，而 UNKNOWN 只会把它降级到 depth-rounded retry queue，因此没有单个困难 shallow candidate 会阻塞更深的 candidates。
+- **Incremental rebuild。** 每接受一个 cut 后，模型都会重建，candidates 会重新映射，因此每个 proof 都运行在更小、更对齐的 miter 上。
+- **Adaptive final budget。** 最后一个 cross-side pair——通常是最深的 multiplier correspondence——会获得剩余 preprocessing budget，按 residual cone size、ITE density 和 structural difference 缩放；如果它的 proof 失败，所有 accumulated lemmas 和 cuts 都会保留，并在 strengthened model 上求解 original bad。失败的 lemma 永远不是 verdict。
+
+Final solving 接收的正是 emitted model。Injected lemmas 和 applied cuts 都是普通 BTOR2 constraints 与结构，因此任何 sound backend——word-level 或 bit-level——都能受益于它们，并且 Theorem 1 端到端成立。
+
+#### Algorithm 1. Progressive lemma scheduling（简化版）
+
+**输入**：miter `M = (X, D, C, b)`，budgets `τ_s`（screen），`T`
+
+```text
+1  Q ← candidates nominated by constraint-legal sampling,
+       ordered by ℓ(·) ascending;
+2  while Q ≠ ∅ and time < Tpre do
+3      r ← pop lowest-level candidate;
+4      res ← prove r with Bitwuzla, budget τs;  // SAT screen
+5      if res = UNSAT and r unconditional and safe (R4) then
+6          apply verified cut; fold constants; remap and renominate Q;
+7      else if res = UNSAT then
+8          C ← C ∪ {r};  // inject guarded lemma
+9      else if res = UNKNOWN and r promising then
+10         requeue r in depth-rounded retry queue;
+11     else
+12         discard r;  // SAT: refuted by counterexample
+13 give the last scheduled pair an adaptive budget; retry;
+14 return final solve(M);  // backend-agnostic
+```
+
+---
+
+## IV. 评估
+
+### A. Experimental Setup
+
+我们在一个工业 C-to-RTL suite 上评估 BUTTRESS。该 suite 包含 35 个导出为 BTOR2 的 GPU-shader miters，总计 685 个 properties；每个 property 都是一个带 legal-input constraints 的 combinational miter，形式如 Section II-B 所定义。Miters 由我们扩展后的 YosysHQ SBY [11] frontend 构建，该 frontend 被修改后可以构造 C-to-RTL miters，也可以构造 structurally distant implementations 之间的 RTL-to-RTL miters，并导出带有 legal-input 和 case-split constraints 的 per-property BTOR2 models。
+
+我们还使用同一个 frontend 构建了一个开源 suite 作为补充：37 个 equivalence pairs，来自 30 多个流行开源 CPU、FPU、GPU 和 accelerators，包括 Ibex、PicoRV32、Rocket、CVA6、CV32E40P、BOOM、CVFPU、Berkeley HardFloat、NVDLA、Gemmini、Vortex、Ventus、Snitch、Ara 和 T1。每个 pair 都将一个 control portion 与 arithmetic datapath 配对，并标注其来源和类型（combinational LEC 或 sequential SEC）。
+
+工业 suite 覆盖 Section II-A 中的 texture-addressing 和 mantissa datapaths：32 个 miters 覆盖 addressing datapath 的 16 个 levels of detail，另有 3 个 structural variants 重构相同计算（full-range addressing、without level-0 case 的 addressing、以及 slice-only addressing）。
+
+所有实验运行在一台 128-core server 上，内存 377 GiB；每个 property 运行一个 BUTTRESS invocation，使用单个 analysis thread；end-to-end limit 为 4,000 s，preprocessing（lemma-engine）limit 为每个 property 3,000 s；所有 unsound options 都被禁用。
+
+`[Placeholder: baseline methods: Bitwuzla [3], ABC &cec [12], Hybrid-CEC [13] and Kissat [4].]`
+
+译注：原文此处为占位符，计划补充 baseline methods：Bitwuzla [3]、ABC `&cec` [12]、Hybrid-CEC [13] 和 Kissat [4]。
+
+### B. Results on the Industrial Suite
+
+Table II 总结结果：BUTTRESS 判定每个 property——186 个真实 counterexamples 和 499 个 equivalence proofs——没有 UNKNOWN。LOD series 占用 20,529 s 的 property wall time，约每个 property 31 s；最困难的 property 是一个 full-range addressing variant，在 2,519 s 内完成。承载这些 proofs 的是 lemma engine，而不是 final solver：该最困难 property 在 final multiplier pair merge 前 discharge 了 27 个 control-frontier cuts 并注入了 16 个 guarded lemmas；最困难的 no-level-0 variant 在 1,494 s 内证明 39 个 cuts 和 13 个 guarded lemmas，最终得到 UNSAT。
+
+#### Table II. Industrial GPU-shader suite 上的结果
+
+| Group | Miters | Props | SAT | UNSAT | UNK. |
+|---|---:|---:|---:|---:|---:|
+| LOD series（16 levels） | 32 | 656 | 180 | 476 | 0 |
+| Structural variants | 3 | 29 | 6 | 23 | 0 |
+| Total | 35 | 685 | 186 | 499 | 0 |
+
+### C. Results on the Open-Source Suite
+
+开源 suite 被校准为对已有 open flows 困难：SBY 搭配 state-of-the-art rIC3 model checker [14]（unbounded prove mode，每个 circuit 3,600 s）能判定 37 个 pairs 中的 20 个——全部在 101 s 内完成——但其余 17 个会 timeout 或勉强完成，这些 pair 主要由 pipelined 和 iterative multipliers、FMA units 以及 dividers 构成。它们正是 BUTTRESS 目标中的 guarded、structurally dissimilar arithmetic correspondences。
+
+`[Placeholder: BUTTRESS results on the suite (verdicts, runtimes, lemmas per circuit); decide whether the sequential SEC pairs are reported via the frontend’s unrolling or deferred. The labeled suite will be released publicly.]`
+
+译注：原文此处为占位符，计划补充 BUTTRESS 在该 suite 上的 verdicts、runtimes、每个 circuit 的 lemmas 数量，并决定 sequential SEC pairs 是否通过 frontend unrolling 报告或 deferred。该 labeled suite 计划公开发布。
+
+### D. Comparison with Monolithic Solving and a Commercial Flow
+
+`[Placeholder: rerun the suite with the lemma engine disabled (final solve only) under the same 4,000 s budget; report the number of properties left UNKNOWN ([N]) and a runtime scatter/cactus plot of monolithic vs. BUTTRESS. This is the [N] claimed in the abstract. mli: need to state that BUTTRESS puts the intensive solving time into preprocessing.]`
+
+译注：原文此处为占位符，计划在相同 4,000 s budget 下禁用 lemma engine（只做 final solve）重新运行 suite，报告仍为 UNKNOWN 的 properties 数量 `[N]`，并给出 monolithic vs. BUTTRESS 的 runtime scatter / cactus plot。此 `[N]` 对应摘要中的 `[N]`。作者备注：需要说明 BUTTRESS 将 intensive solving time 放入 preprocessing。
+
+我们还与一个领先的商业 datapath equivalence-checking flow 比较，根据 license terms 将其匿名为 COMMEC，并在同一机器与 per-property budget 下运行。
+
+`[Placeholder: properties decided by COMMEC out of the box vs. with engineer-written helper lemmas, and runtime comparison against BUTTRESS. Also state the assume guarantee part of COMMEC, includes all prev and standard, and BUTTRESS equals to standard.]`
+
+译注：原文此处为占位符，计划补充 COMMEC 开箱即用与带 engineer-written helper lemmas 时判定的 properties 数量，以及与 BUTTRESS 的 runtime comparison；同时说明 COMMEC 的 assume guarantee 部分包含 all prev 和 standard，且 BUTTRESS 等价于 standard。
+
+### E. Ablation: Lemma Families and Injection
+
+`[Placeholder: (a) operation families—add / add,mul / add,mul,div—to attribute convergence to each pattern of Sec. III-B; (b) cuts-only vs. cuts+injected guarded lemmas, attributing [M] otherwise-unprovable properties to injection (R3); (c) scheduling off (flat order) to isolate the contribution of Sec. III-C.]`
+
+译注：原文此处为占位符，计划补充 ablation：
+
+1. operation families：add / add,mul / add,mul,div，用于归因 Section III-B 中每类 pattern 对收敛的贡献；
+2. cuts-only vs. cuts + injected guarded lemmas，将 `[M]` 个否则不可证明的 properties 归因于 injection（R3）；
+3. 关闭 scheduling（flat order），隔离 Section III-C 的贡献。
+
+### F. Soundness Validation
+
+除 Theorem 1 外，作者还验证了实现。每个 SAT verdict 都伴随一个 original miter inputs 上的 counterexample；全部 186 个 counterexamples 都能在 unmodified miter 上成功 replay，并满足其 constraints。所有 tested configurations 之间 verdicts 相互一致——从未观察到 SAT / UNSAT disagreement——released binary 通过完整 unit 和 integration test suite（29/29），其中包括 mutation-based soundness checks，用于验证被破坏的 lemma 或 cut 总会被其 proof obligation 拒绝。
+
+### G. Supportive Operators
+
+`[Placeholder: we may consider the range of ops, in case that forword’s authors challenge us.]`
+
+译注：原文此处为占位符，表示作者可能会补充支持 operators 的范围，以应对 FORWORD 作者可能提出的挑战。
+
+---
+
+## V. 相关工作
+
+### A. Monolithic decision procedures
+
+获得 datapath verdict 的直接 route 是把整个 miter 交给 decision procedure。Bitwuzla [3] 将 aggressive word-level rewriting 与 bit-blasting 结合到 SAT backend（如 CaDiCaL [4]）；BUTTRESS 基于它作为 proof engine。在 C-to-RTL setting 中，hw-cbmc [15] 率先通过将 C program 和 Verilog design 都 unwind 到 bounded model checking instance 来检查二者的 behavioral consistency，同样以 monolithic 方式 discharge。
+
+所有这些方法都把 miter 视为一个封闭公式：它们不会获得关于内部 cross-side structure 的信息；在 structurally dissimilar arithmetic 上，search 会退化为同时对两个无关的 multiplier 和 divider networks 进行 reasoning。
+
+### B. Miter reduction by sweeping and rewriting
+
+因此，equivalence-checking engines 会先 reduce miter。SAT sweeping 和 FRAIGing [5], [6] 通过 simulation 探测内部等价 node pairs，并在 proof 后合并它们；FORWORD [7] 将这一 recipe 提升到 word level，用 SMT solver sweeping 由 word-level simulation 提名的 candidate equalities；e-graph-based assistants [8] 则在一个 e-graph 内重写 reference 和 implementation，直到一个 checked intermediate designs 链将二者连接起来。
+
+Sweeping 是我们的 verified cuts（R2）最接近的相关方法，我们共享其 simulate-then-prove discipline。然而，这两类路线只能利用使两侧重合的 relations——merge 只有对 unconditional equivalent、width-compatible pairs 才是 sound 的，并且 rewrite chain 必须以 syntactic equality 结束。Section II-A 中的 guarded、width-changing、shifted word-level correspondences——在 bypassed inputs 上为 false，并关联不同 sorts 的 nodes——仍处在这些 vocabularies 之外。
+
+在 bit-level sequential equivalence checking 中，speculative reduction 会在证明 suspected gate redundancies 之前就假定它们 [16], [17]；conditional-equivalence invariants 关联那些仅在 learned condition 下才一致的 gate pairs [18]。这些 frameworks 预示了我们的 assume-then-prove discipline，但它们操作的是 structurally similar netlists 的 bit-level gate pairs，无法表达 width-changing 或 shifted relations。
+
+### C. Manual helper lemmas
+
+商业 C-to-RTL 工具 [1], [2] 则把缺失的表达能力暴露给用户：verification engineers 编写 helper lemmas、case splits 和 internal assertions，直到 proof 收敛 [9]。这种实践同时证明了：
+
+1. guarded internal correspondences 正是 hard datapath proofs 所需的内容；
+2. 它们确实能被经常找到——但需要每个设计耗费数小时的人类洞察。
+
+据作者所知，BUTTRESS 是第一个完全自动化地在 structurally dissimilar miters 上发现、证明并注入 word-level guarded、width-changing、shifted arithmetic correspondences 的 flow；也是第一个 academic flow，其在工业 datapath miters 上的收敛能力达到或超过昂贵商业 datapath-verification tools——同时自动化了它们实现收敛所依赖的 manual helper-lemma 步骤。
+
+---
+
+## VI. 结论
+
+困难 datapath equivalence proofs 的失败并不是因为 solver power 不足，而是因为缺少可表达的内部结构：optimized designs 中实际成立的 correspondences 是 guarded、width-changing 和 shifted 的，而没有任何 cut-point merge 能表示它们。
+
+BUTTRESS 将此类 correspondences 变成 first-class。Constraint-legal simulation 提名它们，Bitwuzla UNSAT proof 授权每一个候选，并且两种 sound actions——针对 unconditional relations 的 verified cuts，以及针对 guarded relations 的 constraint injection——会从 inputs 到 property 渐进式加强 miter，而不会重写 guard 未覆盖的任何内容。
+
+在包含 685 个 properties 的工业 GPU-shader suite 上，这种方法收敛了每个 proof；最困难 properties 由数十个 proven cuts 和 injected lemmas 支撑，而不是由 final solve 单独完成。由于 injected lemmas 是普通 constraints，该方法可以与任何 backend 组合，并且作者认为也可与更丰富的 lemma sources 组合：把 discovery 扩展到 bit-level multiplier implementations 的 proved abstractions，是自然的下一步。
+
+---
+
+## 参考文献
+
+[1] Synopsys, “Synopsys VC Formal Datapath Validation (DPV),” 2024. [Online]. Available: https://www.synopsys.com/verification/static-and-formal-verification/vc-formal/vc-formal-datapath-validation.html
+
+[2] Cadence Design Systems, “Cadence Jasper C Formal Verification,” 2024. [Online]. Available: https://www.cadence.com/en_US/home/tools/system-design-and-verification/formal-and-static-verification/jasper-c-formal-verification.html
+
+[3] A. Niemetz and M. Preiner, “Bitwuzla,” in *International Conference on Computer Aided Verification*. Springer, 2023, pp. 3–17.
+
+[4] A. Biere, T. Faller, K. Fazekas, M. Fleury, N. Froleyks, and F. Pollitt, “CaDiCaL, Gimsatul, IsaSAT and Kissat entering the SAT Competition 2024,” *Proc. of SAT Competition*, vol. 8, 2024.
+
+[5] A. Kuehlmann and F. Krohm, “Equivalence checking using cuts and heaps,” in *Proceedings of the 34th Annual Design Automation Conference*, 1997, pp. 263–268.
+
+[6] A. Mishchenko, S. Chatterjee, R. Jiang, and R. K. Brayton, “FRAIGs: A unifying representation for logic synthesis and verification,” ERL Technical Report, Tech. Rep., 2005.
+
+[7] Z. Yang, G. Hu, X. Zhou, M. Miao, C. Yu, W. Zhang, and H. Zhang, “FORWORD: Accelerating formal datapath verification via word-level sweeping,” in *2026 Design, Automation & Test in Europe Conference (DATE)*. IEEE, 2026, pp. 1–7.
+
+[8] S. Coward, E. Morini, B. Tan, T. Drane, and G. A. Constantinides, “Datapath verification via word-level e-graph rewriting,” in *2023 Formal Methods in Computer-Aided Design (FMCAD)*. IEEE, 2023, pp. 92–100.
+
+[9] R. Aneja, A. Darbari, N. Mhaske, and P. Bjesse, “Tackling the complexity problem in control and datapath designs with formal verification,” DVCon 2019 Presentation, 2019, accessed: Aug. 10, 2026. [Online]. Available: https://dvcon-proceedings.org/wp-content/uploads/tackling-the-complexity-problem-in-control-and-datapath-designs-with-formal-verification-presentation.pdf
+
+[10] A. Niemetz, M. Preiner, C. Wolf, and A. Biere, “BTOR2, BtorMC and Boolector 3.0,” in *International Conference on Computer Aided Verification*. Springer, 2018, pp. 587–595.
+
+[11] YosysHQ, “SymbiYosys (sby): Front-end for Yosys-based formal verification flows,” https://github.com/YosysHQ/sby, 2025.
+
+[12] R. Brayton and A. Mishchenko, “ABC: An academic industrial-strength verification tool,” in *International Conference on Computer Aided Verification*. Springer, 2010, pp. 24–40.
+
+[13] Z. Chen, X. Zhang, Y. Qian, Q. Xu, and S. Cai, “Integrating exact simulation into sweeping for datapath combinational equivalence checking,” in *2023 IEEE/ACM International Conference on Computer Aided Design (ICCAD)*. IEEE, 2023, pp. 1–9.
+
+[14] Y. Su, Q. Yang, Y. Ci, T. Bu, and Z. Huang, “The rIC3 hardware model checker,” in *International Conference on Computer Aided Verification*. Springer, 2025, pp. 185–199.
+
+[15] E. Clarke, D. Kroening, and K. Yorav, “Behavioral consistency of C and Verilog programs using bounded model checking,” in *Proceedings of the 40th Design Automation Conference (DAC)*. ACM/IEEE, 2003, pp. 368–371.
+
+[16] H. Mony, J. Baumgartner, V. Paruthi, and R. Kanzelman, “Exploiting suspected redundancy without proving it,” in *Proceedings of the 42nd Annual Design Automation Conference*, 2005, pp. 463–466.
+
+[17] H. Mony, J. Baumgartner, A. Mishchenko, and R. Brayton, “Speculative reduction-based scalable redundancy identification,” in *2009 Design, Automation & Test in Europe Conference & Exhibition*. IEEE, 2009, pp. 1674–1679.
+
+[18] J. Baumgartner, H. Mony, M. Case, J. Sawada, and K. Yorav, “Scalable conditional equivalence checking: An automated invariant-generation based approach,” in *2009 Formal Methods in Computer-Aided Design*. IEEE, 2009, pp. 120–127.
