@@ -1,33 +1,435 @@
-#!/usr/bin/env bash
+cv32e40x Formal 验证环境分析与 JG 流程移植记录
+================================================
 
-set -u
+一、初始问题
+----------
 
-LEFT_DIR="${1:-/home/jiongming/desktop/dpv}"
-RIGHT_DIR="${2:-/home/jiongming/desktop/dynamic/sources/dpv_fixed_by_codex}"
-OUTPUT_FILE="${3:-/home/jiongming/desktop/dpv_diff.patch}"
+用户希望分析以下两个仓库，重点了解它们与 cv32e40x 电路的关系，以及验证环境和设计文件的位置：
 
-for dir in "$LEFT_DIR" "$RIGHT_DIR"; do
-    if [[ ! -d "$dir" ]]; then
-        echo "错误：目录不存在：$dir" >&2
-        exit 2
-    fi
-done
+1. /home/jiongming/desktop/AppNote-123
+2. /home/jiongming/desktop/cv32e40x-dv
 
-mkdir -p "$(dirname "$OUTPUT_FILE")"
 
-LC_ALL=C diff -ruN --exclude=.git -- "$LEFT_DIR" "$RIGHT_DIR" >"$OUTPUT_FILE"
-diff_status=$?
+二、仓库关系结论
+--------------
 
-case "$diff_status" in
-    0)
-        echo "两个目录内容一致；空的 diff 结果已保存到：$OUTPUT_FILE"
-        ;;
-    1)
-        echo "发现目录差异；diff 结果已保存到：$OUTPUT_FILE"
-        ;;
-    *)
-        echo "错误：diff 执行失败（退出码：$diff_status）" >&2
-        exit "$diff_status"
-        ;;
-esac
+三个名称分别代表三种层次：
 
+    cv32e40x                 = 被验证的 RISC-V 处理器 RTL 设计（DUT）
+    cv32e40x-dv              = OpenHW 官方、专门针对 cv32e40x 的验证仓库
+    AppNote-123/cv32e40x     = 基于旧版官方验证环境改造出的 SymbiYosys/开源形式验证示例
+
+cv32e40x-dv 和 AppNote-123 都不是 cv32e40x RTL 的主设计仓库。RTL 原本属于独立的 openhwgroup/cv32e40x 仓库，由验证环境克隆或引用。
+
+1. AppNote-123
+
+AppNote-123 是 YosysHQ 的高级 SymbiYosys 使用示例集合。其中 cv32e40x 案例基于官方 CV32E40X Design-Verification environment，将 JasperGold 脚本转换成 SBY 流程。
+
+相关入口：
+
+    /home/jiongming/desktop/AppNote-123/README.md
+    /home/jiongming/desktop/AppNote-123/cv32e40x/Makefile
+    /home/jiongming/desktop/AppNote-123/cv32e40x/cv32e40x.sby
+    /home/jiongming/desktop/AppNote-123/cv32e40x/dv.patch
+    /home/jiongming/desktop/AppNote-123/cv32e40x/core.patch
+
+Makefile 固定使用：
+
+    core-v-verif commit: 7082e9affb68bc496e7a379dba2de68f0502e881
+    cv32e40x RTL commit: b658fbe0b24da9b60d18d737c4ff4cf58b15dd8f
+
+AppNote 的 cv32e40x 示例组合了：
+
+    官方 cv32e40x RTL
+        +
+    旧版 core-v-verif 中的 cv32e40x 验证环境
+        +
+    AppNote 提供的 SBY 配置和兼容补丁
+        ->
+    使用 SymbiYosys/Yosys 做 cv32e40x 形式验证
+
+2. cv32e40x-dv
+
+cv32e40x-dv 是 OpenHW 官方的 cv32e40x 专用 DV 仓库，包含：
+
+    env/             UVM environment
+    tb/              testbench 和 assertions
+    tests/           测试用例
+    sim/             仿真入口
+    fv/              形式验证入口
+    regress/         回归配置
+    bsp/             测试软件 BSP
+    mk/              构建与工具规则
+
+它不直接保存 cv32e40x RTL。默认从：
+
+    https://github.com/openhwgroup/cv32e40x
+
+克隆 RTL 到：
+
+    cv32e40x-dv/core-v-cores/cv32e40x
+
+也可以通过 CV_CORE_PATH 链接外部 RTL 工作区。
+
+当前 /home/jiongming/desktop/cv32e40x-dv 中没有 core-v-cores/cv32e40x，因此当前 checkout 只有验证环境，没有本地 DUT RTL。
+
+3. 两份验证环境的版本关系
+
+AppNote 使用的是旧式 core-v-verif 单体仓库布局：
+
+    core-v-verif/
+    ├── lib/
+    ├── mk/
+    ├── cv32e40p/
+    ├── cv32e40s/
+    ├── cv32e40x/
+    └── cva6/
+
+独立 cv32e40x-dv 从其中的 cv32e40x 专用目录演进而来，后来迁移到 standalone layout。
+
+因此二者不是完全相同的副本：
+
+    AppNote 固定使用较旧的 core-v-verif 和 RTL commit，并打兼容补丁；
+    cv32e40x-dv 是后续继续演进的专用 DV 仓库；
+    AppNote 主要展示 SBY/Yosys 形式验证移植；
+    cv32e40x-dv 是日常维护的 cv32e40x 专用验证工程。
+
+
+三、设计文件与验证环境位置
+------------------------
+
+1. AppNote 中现有的 cv32e40x RTL
+
+RTL 根目录：
+
+    /home/jiongming/desktop/AppNote-123/cv32e40x/core-v-verif/core-v-cores/cv32e40x/rtl
+
+主要文件：
+
+    core-v-cores/cv32e40x/cv32e40x_manifest.flist
+    core-v-cores/cv32e40x/rtl/cv32e40x_core.sv
+    core-v-cores/cv32e40x/rtl/include/cv32e40x_pkg.sv
+    core-v-cores/cv32e40x/bhv/cv32e40x_wrapper.sv
+    core-v-cores/cv32e40x/bhv/cv32e40x_rvfi.sv
+
+流水线和功能模块均在 rtl/，例如：
+
+    cv32e40x_if_stage.sv
+    cv32e40x_id_stage.sv
+    cv32e40x_ex_stage.sv
+    cv32e40x_wb_stage.sv
+    cv32e40x_controller*.sv
+    cv32e40x_cs_registers.sv
+    cv32e40x_load_store_unit.sv
+    cv32e40x_alu.sv
+    cv32e40x_mult.sv
+    cv32e40x_div.sv
+
+2. AppNote 下载的验证环境
+
+    /home/jiongming/desktop/AppNote-123/cv32e40x/core-v-verif
+
+cv32e40x 专用部分：
+
+    core-v-verif/cv32e40x/env/             UVM environment
+    core-v-verif/cv32e40x/tb/uvmt/         UVM testbench、DUT wrapper、接口
+    core-v-verif/cv32e40x/tb/assertions/   外围和集成断言
+    core-v-verif/cv32e40x/tests/           软件与 UVM 测试
+    core-v-verif/cv32e40x/sim/             仿真入口
+    core-v-verif/cv32e40x/fv/              JG 等形式验证入口
+
+公共验证库：
+
+    core-v-verif/lib/isa_decoder
+    core-v-verif/lib/support
+    core-v-verif/lib/uvm_agents
+    core-v-verif/mk
+
+3. 独立 cv32e40x-dv 的预期 RTL 位置
+
+    /home/jiongming/desktop/cv32e40x-dv/core-v-cores/cv32e40x/rtl
+
+当前尚未克隆该 RTL。
+
+
+四、自研 formal 工具的当前目标
+--------------------------
+
+用户说明当前不一定需要比较自研 formal 工具与 JG 的差异，当前目标是：
+
+    将 JG 的 cv32e40x 验证流程移植到自研工具中并跑通；
+    formal 相关的约束和断言与 JG 配置保持一致。
+
+因此当前任务不是性能比较，而是复现 JG 的形式模型。
+
+应该以以下两个文件作为规范：
+
+    /home/jiongming/desktop/AppNote-123/cv32e40x/core-v-verif/cv32e40x/fv/jaspergold.tcl
+    /home/jiongming/desktop/AppNote-123/cv32e40x/core-v-verif/cv32e40x/fv/fv.flist
+
+不要以 AppNote 的 cv32e40x.sby 作为唯一规范，因为 SBY 版本加入了工具兼容改动、cutpoint、flatten 和被注释掉的属性。
+
+
+五、JG 流程的关键语义
+------------------
+
+1. 编译
+
+JG 执行：
+
+    analyze -sv12 -f fv.flist
+
+自研工具需要：
+
+    使用 SystemVerilog 2012；
+    保持 fv.flist 文件顺序；
+    支持递归 -f；
+    展开 ${...} 环境变量；
+    支持 +incdir+；
+    从 fv/ 目录运行或正确重定位相对路径。
+
+2. 顶层
+
+JG 执行：
+
+    elaborate -top uvmt_cv32e40x_tb -extract_covergroup
+
+顶层实例关系：
+
+    uvmt_cv32e40x_tb
+    └── dut_wrap : uvmt_cv32e40x_dut_wrap
+        └── cv32e40x_wrapper_i : cv32e40x_wrapper
+            └── core_i : cv32e40x_core
+
+不能简单将 cv32e40x_core 改成 formal 顶层，否则外围内存模型、接口约束、bind 断言和 integration assertions 会丢失。
+
+3. FORMAL 宏和兼容 stub
+
+文件：
+
+    cv32e40x/fv/defines.sv
+
+内容：
+
+    `define FORMAL 1
+
+formal 编译还需要：
+
+    cv32e40x/fv/uvm_pkg.sv
+    cv32e40x/fv/dummy_pkg.sv
+
+它们是 formal 专用替身，不是完整 UVM runtime。它们提供空 uvm_pkg、空 uvm_error/uvm_info 宏，以及编译所需的 package、interface 和 typedef。
+
+4. 时钟和复位
+
+JG 配置：
+
+    clock clknrst_if.clk
+    reset ~clknrst_if.reset_n
+
+完整信号路径：
+
+    uvmt_cv32e40x_tb.clknrst_if.clk
+    uvmt_cv32e40x_tb.clknrst_if.reset_n
+
+reset 为低有效。移植时还需要核对初始复位、解除复位、是否允许再次复位，以及 $past/$rose/$fell 在初始周期的语义。
+
+5. assert 转 assume
+
+JG 将五组 assertions 转成环境 assumptions：
+
+    assume -from_assert {*_memory_assert_i.u_assert.a_r_after_a}
+    assume -from_assert {*.obi_*_memory_assert_i.*.a_*par}
+    assume -from_assert {*integration_assert_i.a_stable_*}
+    assume -from_assert {*integration_assert_i.a_aligned_*}
+    assume -from_assert {*integration_assert_i.a_no_scan_cg}
+
+主要源文件：
+
+    lib/uvm_agents/uvma_obi_memory/src/uvma_obi_memory_assert.sv
+    lib/uvm_agents/uvma_obi_memory/src/uvma_obi_memory_1p2_assert.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_integration_assert.sv
+
+自研工具必须在 elaboration 后按完整层次化名称进行角色转换：
+
+    原始源码：assert property(...)
+    最终模型：assume property(...)
+
+建议输出每个 pattern 的匹配数量、完整 property 名称、原角色和新角色。任何 pattern 匹配为零时应报错。
+
+
+六、“跑通”的第一验收标准及对应文件
+--------------------------------
+
+第一验收标准不是证明了多少条，而是：
+
+    相同 RTL 与参数
+    相同顶层和实例层次
+    相同 assertion/assumption/cover 集合
+    相同 clock/reset
+    相同环境约束
+
+1. 相同 RTL 与参数
+
+权威文件：
+
+    core-v-cores/cv32e40x/cv32e40x_manifest.flist
+    core-v-cores/cv32e40x/rtl/cv32e40x_core.sv
+    core-v-cores/cv32e40x/rtl/include/cv32e40x_pkg.sv
+    core-v-cores/cv32e40x/bhv/cv32e40x_wrapper.sv
+    cv32e40x/tests/uvmt/base-tests/uvmt_cv32e40x_base_test_pkg.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_dut_wrap.sv
+    cv32e40x/fv/defines.sv
+
+验收内容：
+
+    RTL 文件列表与顺序；
+    include directory；
+    FORMAL 等宏；
+    每个实例的 parameter override；
+    RTL Git commit。
+
+2. 相同顶层和实例层次
+
+权威文件：
+
+    cv32e40x/fv/jaspergold.tcl
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_tb.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_dut_wrap.sv
+    core-v-cores/cv32e40x/bhv/cv32e40x_wrapper.sv
+    core-v-cores/cv32e40x/rtl/cv32e40x_core.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_tb_files.flist
+
+验收内容：
+
+    模块实例完整路径；
+    每个实例的参数值；
+    bind 后产生的属性实例；
+    被裁剪或未引用的模块。
+
+3. 相同 assertion/assumption/cover 集合
+
+权威入口：
+
+    cv32e40x/fv/fv.flist
+
+设计内部 SVA：
+
+    core-v-cores/cv32e40x/sva/
+
+验证环境 SVA：
+
+    cv32e40x/tb/assertions/
+    cv32e40x/tb/uvmt/
+
+主要文件：
+
+    cv32e40x_core_sva.sv
+    cv32e40x_controller_fsm_sva.sv
+    cv32e40x_cs_registers_sva.sv
+    cv32e40x_ex_stage_sva.sv
+    cv32e40x_id_stage_sva.sv
+    cv32e40x_mpu_sva.sv
+    cv32e40x_prefetcher_sva.sv
+    cv32e40x_sleep_unit_sva.sv
+    uvmt_cv32e40x_fencei_assert.sv
+    uvmt_cv32e40x_rvfi_assert.sv
+    uvmt_cv32e40x_atomic_assert.sv
+    uvmt_cv32e40x_debug_assert.sv
+    uvmt_cv32e40x_interrupt_assert.sv
+    uvmt_cv32e40x_pma_assert.sv
+    uvmt_cv32e40x_integration_assert.sv
+    uvmt_cv32e40x_triggers_assert_cov.sv
+
+验收内容：
+
+    assert 数量与完整层次名；
+    assume 数量与完整层次名；
+    cover 数量与完整层次名；
+    每条 property 的 clocking event；
+    每条 property 的 disable iff；
+    assert-to-assume 转换后的最终角色。
+
+4. 相同 clock/reset
+
+权威配置：
+
+    cv32e40x/fv/jaspergold.tcl
+
+接口定义和实例：
+
+    cv32e40x/fv/dummy_pkg.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_tb.sv
+
+验收内容：
+
+    clock 信号相同；
+    reset 信号和有效电平相同；
+    初始复位和解除语义相同；
+    时序采样和历史操作符的初始语义相同。
+
+5. 相同环境约束
+
+权威配置：
+
+    cv32e40x/fv/jaspergold.tcl
+
+约束来源：
+
+    lib/uvm_agents/uvma_obi_memory/src/uvma_obi_memory_assert.sv
+    lib/uvm_agents/uvma_obi_memory/src/uvma_obi_memory_1p2_assert.sv
+    cv32e40x/tb/uvmt/uvmt_cv32e40x_integration_assert.sv
+
+验收内容：
+
+    五个 JG pattern 实际匹配的 property 完整名称；
+    每个 pattern 的匹配数量；
+    属性是否从 assert 正确转换为 assume；
+    是否存在额外或缺失的环境约束。
+
+
+七、运行所需环境变量
+------------------
+
+    CORE_V_VERIF=/home/jiongming/desktop/AppNote-123/cv32e40x/core-v-verif
+    CV_CORE=cv32e40x
+    CV_CORE_PKG=$CORE_V_VERIF/core-v-cores/cv32e40x
+    DV_ISA_DECODER_PATH=$CORE_V_VERIF/lib/isa_decoder
+    DV_SUPPORT_PATH=$CORE_V_VERIF/lib/support
+    DV_UVM_TESTCASE_PATH=$CORE_V_VERIF/cv32e40x/tests/uvmt
+    DV_UVMA_PATH=$CORE_V_VERIF/lib/uvm_agents
+    DV_UVME_PATH=$CORE_V_VERIF/cv32e40x/env/uvme
+    DV_UVMT_PATH=$CORE_V_VERIF/cv32e40x/tb/uvmt
+    DESIGN_RTL_DIR=$CV_CORE_PKG/rtl
+
+
+八、建议的移植和验收顺序
+----------------------
+
+1. 完整解析原始 fv.flist。
+2. 以 uvmt_cv32e40x_tb 为顶层完成 elaboration。
+3. 导出实例树，与 JG elaborated design 对照。
+4. 导出 assert、assume、cover inventory。
+5. 执行五组 assert-to-assume 转换并核对匹配列表。
+6. 对齐 clock/reset 语义。
+7. 运行单个简单 assertion 的浅层 BMC。
+8. 运行全部 assertion 的浅层 BMC。
+9. 最后启用 unbounded proof 或收敛流程。
+
+
+九、重要注意事项
+--------------
+
+当前 AppNote 工作区已经应用了 dv.patch 和 core.patch：
+
+    dv.patch 会注释掉部分开源工具不支持的 SVA；
+    core.patch 会修改 clock-gate formal 模型。
+
+如果目标是严格复现原始 JG 模型，应使用未打补丁的同一 commit 建立干净 snapshot，不要直接撤销当前用户工作区的修改。
+
+建议区分两个阶段：
+
+    第一阶段：原始 JG 模型兼容性和语义移植；
+    第二阶段：如自研工具暂不支持某些 SVA，再建立有明确记录的兼容性子集。
+
+任何被移除、改写或降级的 assertion 都应进入清单，不能静默跳过。
