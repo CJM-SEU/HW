@@ -1,41 +1,67 @@
-#!/usr/bin/env bash
-set -euo pipefail
+`ifndef COREV_ASSERT_OFF
 
-scriptDir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-coreVVerifDir="$(cd -- "$scriptDir/../.." && pwd -P)"
+  // The ID-stage SVA checks only rs1 and rs2, even when X_NUM_RS is 3.
+  wire rf_addr_t id_stage_rf_raddr[2];
 
-export CORE_V_VERIF="$coreVVerifDir"
-export CV_CORE="cv32e40x"
+  assign id_stage_rf_raddr[0] = core_i.id_stage_i.rf_raddr_o[0];
+  assign id_stage_rf_raddr[1] = core_i.id_stage_i.rf_raddr_o[1];
 
-export CV_CORE_PKG="$coreVVerifDir/core-v-cores/cv32e40x"
-export DESIGN_RTL_DIR="$CV_CORE_PKG/rtl"
+  cv32e40x_if_stage_sva #(
+    .CLIC (CLIC)
+  ) if_stage_sva (
+    .clk                     (core_i.if_stage_i.clk),
+    .rst_n                   (core_i.if_stage_i.rst_n),
+    .if_ready                (core_i.if_stage_i.if_ready),
+    .if_valid_o              (core_i.if_stage_i.if_valid_o),
+    .ctrl_fsm_i              (core_i.if_stage_i.ctrl_fsm_i),
+    .m_c_obi_instr_if        (core_i.m_c_obi_instr_if),
+    .seq_valid               (core_i.if_stage_i.seq_valid),
+    .seq_ready               (core_i.if_stage_i.seq_ready),
+    .illegal_c_insn          (core_i.if_stage_i.illegal_c_insn),
+    .instr_compressed        (core_i.if_stage_i.instr_compressed),
+    .prefetch_is_tbljmp_ptr  (core_i.if_stage_i.prefetch_is_tbljmp_ptr),
+    .prefetch_is_clic_ptr    (core_i.if_stage_i.prefetch_is_clic_ptr),
+    .prefetch_is_mret_ptr    (core_i.if_stage_i.prefetch_is_mret_ptr),
+    .branch_addr_n           (core_i.if_stage_i.branch_addr_n),
+    .id_ready_i              (core_i.if_stage_i.id_ready_i),
+    .ptr_in_if_o             (core_i.if_stage_i.ptr_in_if_o)
+  );
 
-export DV_UVMT_PATH="$coreVVerifDir/cv32e40x/tb/uvmt"
-export DV_UVME_PATH="$coreVVerifDir/cv32e40x/env/uvme"
-export DV_UVMA_PATH="$coreVVerifDir/lib/uvm_agents"
-export DV_UVM_TESTCASE_PATH="$coreVVerifDir/cv32e40x/tests/uvmt"
-export DV_ISA_DECODER_PATH="$coreVVerifDir/lib/isa_decoder"
-export DV_SUPPORT_PATH="$coreVVerifDir/lib/support"
+  cv32e40x_id_stage_sva #(
+    .RV32 (RV32)
+  ) id_stage_sva (
+    .clk                     (core_i.id_stage_i.clk),
+    .rst_n                   (core_i.id_stage_i.rst_n),
+    .rf_re                   (core_i.id_stage_i.rf_re),
+    .rf_raddr_o              (id_stage_rf_raddr),
+    .rf_we                   (core_i.id_stage_i.rf_we),
+    .rf_we_dec               (core_i.id_stage_i.rf_we_dec),
+    .rf_waddr                (core_i.id_stage_i.rf_waddr),
+    .alu_en                  (core_i.id_stage_i.alu_en),
+    .div_en                  (core_i.id_stage_i.div_en),
+    .mul_en                  (core_i.id_stage_i.mul_en),
+    .csr_en                  (core_i.id_stage_i.csr_en),
+    .sys_en                  (core_i.id_stage_i.sys_en),
+    .lsu_en                  (core_i.id_stage_i.lsu_en),
+    .xif_en                  (core_i.id_stage_i.xif_en),
+    .alu_op_a_mux_sel        (core_i.id_stage_i.alu_op_a_mux_sel),
+    .alu_op_b_mux_sel        (core_i.id_stage_i.alu_op_b_mux_sel),
+    .op_c_mux_sel            (core_i.id_stage_i.op_c_mux_sel),
+    .ex_ready_i              (core_i.id_stage_i.ex_ready_i),
+    .illegal_insn            (core_i.id_stage_i.illegal_insn),
+    .csr_op                  (core_i.id_stage_i.csr_op),
+    .id_ex_pipe_o            (core_i.id_stage_i.id_ex_pipe_o),
+    .id_ready_o              (core_i.id_stage_i.id_ready_o),
+    .id_valid_o              (core_i.id_stage_i.id_valid_o),
+    .ctrl_fsm_i              (core_i.id_stage_i.ctrl_fsm_i),
+    .xif_insn_accept         (core_i.id_stage_i.xif_insn_accept),
+    .jalr_fw                 (core_i.id_stage_i.jalr_fw),
+    .operand_a_fw            (core_i.id_stage_i.operand_a_fw),
+    .alu_jmpr                (core_i.id_stage_i.alu_jmpr),
+    .jmp_target_o            (core_i.id_stage_i.jmp_target_o),
+    .jmp_taken_id_ctrl_i     (
+      core_i.controller_i.controller_fsm_i.jump_taken_id
+    )
+  );
 
-export FV_DEFINES=""
-export FV_INCDIRS=""
-
-requiredPaths=(
-    "$CV_CORE_PKG/cv32e40x_manifest.flist"
-    "$DESIGN_RTL_DIR"
-    "$DV_UVMT_PATH"
-    "$DV_UVME_PATH"
-    "$DV_UVMA_PATH"
-    "$DV_ISA_DECODER_PATH"
-    "$DV_SUPPORT_PATH"
-)
-
-for requiredPath in "${requiredPaths[@]}"; do
-    if [[ ! -e "$requiredPath" ]]; then
-        echo "ERROR: required path does not exist: $requiredPath" >&2
-        exit 1
-    fi
-done
-
-cd "$scriptDir"
-exec your_formal_tool -f "$scriptDir/fv.flist" "$@"
+`endif
