@@ -1,42 +1,67 @@
 `ifndef COREV_ASSERT_OFF
 
-  cv32e40x_ex_stage_sva #(
-    .X_EXT (X_EXT)
-  ) ex_stage_sva (
-    .clk                     (core_i.ex_stage_i.clk),
-    .rst_n                   (core_i.ex_stage_i.rst_n),
-    .ex_ready_o              (core_i.ex_stage_i.ex_ready_o),
-    .ex_valid_o              (core_i.ex_stage_i.ex_valid_o),
-    .wb_ready_i              (core_i.ex_stage_i.wb_ready_i),
-    .wb_valid_i              (core_i.wb_valid),
-    .ctrl_fsm_i              (core_i.ex_stage_i.ctrl_fsm_i),
-    .id_ex_pipe_i            (core_i.ex_stage_i.id_ex_pipe_i),
-    .ex_wb_pipe_o            (core_i.ex_stage_i.ex_wb_pipe_o),
-    .lsu_split_i             (core_i.ex_stage_i.lsu_split_i),
-    .csr_illegal_i           (core_i.ex_stage_i.csr_illegal_i),
-    .branch_target_o         (core_i.ex_stage_i.branch_target_o),
-    .branch_taken_ex_ctrl_i  (
-      core_i.controller_i.controller_fsm_i.branch_taken_ex
-    ),
-    .last_op_o               (core_i.ex_stage_i.last_op_o)
+  // id_stage_sva only checks rs1 and rs2.
+  wire rf_addr_t id_stage_rf_raddr[2];
+
+  assign id_stage_rf_raddr[0] = core_i.id_stage_i.rf_raddr_o[0];
+  assign id_stage_rf_raddr[1] = core_i.id_stage_i.rf_raddr_o[1];
+
+  cv32e40x_if_stage_sva #(
+    .CLIC (CLIC)
+  ) if_stage_sva (
+    .clk                    (core_i.if_stage_i.clk),
+    .rst_n                  (core_i.if_stage_i.rst_n),
+    .if_ready               (core_i.if_stage_i.if_ready),
+    .if_valid_o             (core_i.if_stage_i.if_valid_o),
+    .ctrl_fsm_i             (core_i.if_stage_i.ctrl_fsm_i),
+    .m_c_obi_instr_if       (core_i.m_c_obi_instr_if),
+    .seq_valid              (core_i.if_stage_i.seq_valid),
+    .seq_ready              (core_i.if_stage_i.seq_ready),
+    .illegal_c_insn         (core_i.if_stage_i.illegal_c_insn),
+    .instr_compressed       (core_i.if_stage_i.instr_compressed),
+    .prefetch_is_tbljmp_ptr (core_i.if_stage_i.prefetch_is_tbljmp_ptr),
+    .prefetch_is_clic_ptr   (core_i.if_stage_i.prefetch_is_clic_ptr),
+    .prefetch_is_mret_ptr   (core_i.if_stage_i.prefetch_is_mret_ptr),
+    .branch_addr_n          (core_i.if_stage_i.branch_addr_n),
+    .id_ready_i             (core_i.if_stage_i.id_ready_i),
+    .ptr_in_if_o            (core_i.if_stage_i.ptr_in_if_o)
   );
 
-  cv32e40x_wb_stage_sva #(
-    .DEBUG (DEBUG)
-  ) wb_stage_sva (
-    .clk                 (core_i.wb_stage_i.clk),
-    .rst_n               (core_i.wb_stage_i.rst_n),
-    .wb_ready_o          (core_i.wb_stage_i.wb_ready_o),
-    .wb_valid            (core_i.wb_stage_i.wb_valid),
-    .ctrl_fsm_i          (core_i.wb_stage_i.ctrl_fsm_i),
-    .ex_wb_pipe_i        (core_i.wb_stage_i.ex_wb_pipe_i),
-    .lsu_mpu_status_i    (core_i.wb_stage_i.lsu_mpu_status_i),
-    .lsu_mpu_status_q    (core_i.wb_stage_i.lsu_mpu_status_q),
-    .lsu_wpt_match_i     (core_i.wb_stage_i.lsu_wpt_match_i),
-    .rf_we_wb_o          (core_i.wb_stage_i.rf_we_wb_o),
-    .lsu_valid_q         (core_i.wb_stage_i.lsu_valid_q),
-    .lsu_wpt_match_q     (core_i.wb_stage_i.lsu_wpt_match_q),
-    .lsu_valid_i         (core_i.wb_stage_i.lsu_valid_i)
+  cv32e40x_id_stage_sva #(
+    .RV32 (RV32)
+  ) id_stage_sva (
+    .clk                    (core_i.id_stage_i.clk),
+    .rst_n                  (core_i.id_stage_i.rst_n),
+    .rf_re                  (core_i.id_stage_i.rf_re),
+    .rf_raddr_o             (id_stage_rf_raddr),
+    .rf_we                  (core_i.id_stage_i.rf_we),
+    .rf_we_dec              (core_i.id_stage_i.rf_we_dec),
+    .rf_waddr               (core_i.id_stage_i.rf_waddr),
+    .alu_en                 (core_i.id_stage_i.alu_en),
+    .div_en                 (core_i.id_stage_i.div_en),
+    .mul_en                 (core_i.id_stage_i.mul_en),
+    .csr_en                 (core_i.id_stage_i.csr_en),
+    .sys_en                 (core_i.id_stage_i.sys_en),
+    .lsu_en                 (core_i.id_stage_i.lsu_en),
+    .xif_en                 (core_i.id_stage_i.xif_en),
+    .alu_op_a_mux_sel       (core_i.id_stage_i.alu_op_a_mux_sel),
+    .alu_op_b_mux_sel       (core_i.id_stage_i.alu_op_b_mux_sel),
+    .op_c_mux_sel           (core_i.id_stage_i.op_c_mux_sel),
+    .ex_ready_i             (core_i.id_stage_i.ex_ready_i),
+    .illegal_insn           (core_i.id_stage_i.illegal_insn),
+    .csr_op                 (core_i.id_stage_i.csr_op),
+    .id_ex_pipe_o           (core_i.id_stage_i.id_ex_pipe_o),
+    .id_ready_o             (core_i.id_stage_i.id_ready_o),
+    .id_valid_o             (core_i.id_stage_i.id_valid_o),
+    .ctrl_fsm_i             (core_i.id_stage_i.ctrl_fsm_i),
+    .xif_insn_accept        (core_i.id_stage_i.xif_insn_accept),
+    .jalr_fw                (core_i.id_stage_i.jalr_fw),
+    .operand_a_fw           (core_i.id_stage_i.operand_a_fw),
+    .alu_jmpr               (core_i.id_stage_i.alu_jmpr),
+    .jmp_target_o           (core_i.id_stage_i.jmp_target_o),
+    .jmp_taken_id_ctrl_i    (
+      core_i.controller_i.controller_fsm_i.jump_taken_id
+    )
   );
 
 `endif
