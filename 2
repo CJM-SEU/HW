@@ -1,10 +1,524 @@
+// Copyright 2018 ETH Zurich and University of Bologna.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+// Wrapper for a cv32e40x, containing cv32e40x and RVFI
+// Contributors: Davide Schiavone <davide@openhwgroup.org>
+//               Halfdan Bechmann <halfdan.behcmann@silabs.com>
+
+`ifndef COREV_ASSERT_OFF
+  `include "cv32e40x_alignment_buffer_sva.sv"
+  `include "cv32e40x_controller_fsm_sva.sv"
+  `include "cv32e40x_core_sva.sv"
+  `include "cv32e40x_cs_registers_sva.sv"
+  `include "cv32e40x_decoder_sva.sv"
+  `include "cv32e40x_div_sva.sv"
+  `include "cv32e40x_if_stage_sva.sv"
+  `include "cv32e40x_id_stage_sva.sv"
+  `include "cv32e40x_ex_stage_sva.sv"
+  `include "cv32e40x_wb_stage_sva.sv"
+  `include "cv32e40x_load_store_unit_sva.sv"
+  `include "cv32e40x_write_buffer_sva.sv"
+  `include "cv32e40x_lsu_response_filter_sva.sv"
+  `include "cv32e40x_mpu_sva.sv"
+  `include "cv32e40x_mult_sva.sv"
+  `include "cv32e40x_prefetcher_sva.sv"
+  `include "cv32e40x_prefetch_unit_sva.sv"
+  `include "cv32e40x_sleep_unit_sva.sv"
+  `include "cv32e40x_rvfi_sva.sv"
+  `include "cv32e40x_sequencer_sva.sv"
+  `include "cv32e40x_clic_int_controller_sva.sv"
+  `include "cv32e40x_register_file_sva.sv"
+  `include "cv32e40x_wpt_sva.sv"
+  `include "cv32e40x_debug_triggers_sva.sv"
+  `include "cv32e40x_parameter_sva.sv"
+`endif
+
+`include "cv32e40x_wrapper.vh"
+`include "cv32e40x_core_log.sv"
+`include "cv32e40x_dbg_helper.sv"
+
+`ifdef RISCV_FORMAL
+  `include "rvfi_macros.vh"
+`endif
+
+module cv32e40x_wrapper
+  import cv32e40x_pkg::*;
+#(
+  parameter              LIB                          = 0,
+  parameter rv32_e       RV32                         = RV32I,
+  parameter a_ext_e      A_EXT                        = A_NONE,
+  parameter b_ext_e      B_EXT                        = B_NONE,
+  parameter m_ext_e      M_EXT                        = M,
+  parameter bit          X_EXT                        = 0,
+  parameter int unsigned X_NUM_RS                     = 2,
+  parameter int unsigned X_ID_WIDTH                   = 4,
+  parameter int unsigned X_MEM_WIDTH                  = 32,
+  parameter int unsigned X_RFR_WIDTH                  = 32,
+  parameter int unsigned X_RFW_WIDTH                  = 32,
+  parameter logic [31:0] X_MISA                       = 32'h00000000,
+  parameter logic [1:0]  X_ECS_XS                     = 2'b00,
+  parameter int unsigned NUM_MHPMCOUNTERS             = 1,
+  parameter bit          CLIC                         = 0,
+  parameter int unsigned CLIC_ID_WIDTH                = 5,
+  parameter int          DBG_NUM_TRIGGERS             = 1,
+  parameter int          PMA_NUM_REGIONS              = 0,
+  parameter pma_cfg_t    PMA_CFG[PMA_NUM_REGIONS-1:0] = '{default:PMA_R_DEFAULT},
+  parameter bit          CORE_LOG_ENABLE              = 1,
+  parameter bit          DEBUG                        = 1,
+  parameter logic [31:0] DM_REGION_START              = 32'hF0000000,
+  parameter logic [31:0] DM_REGION_END                = 32'hF0003FFF
+)
+(
+  // Clock and Reset
+  input  logic        clk_i,
+  input  logic        rst_ni,
+
+  input  logic        scan_cg_en_i,                     // Enable all clock gates for testing
+
+  // Core ID, Cluster ID, debug mode halt address and boot address are considered more or less static
+  input  logic [31:0] boot_addr_i,
+  input  logic [31:0] mtvec_addr_i,
+  input  logic [31:0] dm_halt_addr_i,
+  input  logic [31:0] mhartid_i,
+  input  logic  [3:0] mimpid_patch_i,
+  input  logic [31:0] dm_exception_addr_i,
+
+  // Instruction memory interface
+  output logic        instr_req_o,
+  input  logic        instr_gnt_i,
+  input  logic        instr_rvalid_i,
+  output logic [31:0] instr_addr_o,
+  output logic [1:0]  instr_memtype_o,
+  output logic [2:0]  instr_prot_o,
+  output logic        instr_dbg_o,
+  input  logic [31:0] instr_rdata_i,
+  input  logic        instr_err_i,
+
+  // Data memory interface
+  output logic        data_req_o,
+  input  logic        data_gnt_i,
+  input  logic        data_rvalid_i,
+  output logic        data_we_o,
+  output logic [3:0]  data_be_o,
+  output logic [31:0] data_addr_o,
+  output logic [1:0]  data_memtype_o,
+  output logic [2:0]  data_prot_o,
+  output logic        data_dbg_o,
+  output logic [31:0] data_wdata_o,
+  input  logic [31:0] data_rdata_i,
+  input  logic        data_err_i,
+  output logic [5:0]  data_atop_o,
+  input  logic        data_exokay_i,
+
+  // Cycle Count
+  output logic [63:0] mcycle_o,
+
+  // Time input
+  input  logic [63:0] time_i,
+
+  // eXtension interface
+  cv32e40x_if_xif.cpu_compressed xif_compressed_if,
+  cv32e40x_if_xif.cpu_issue      xif_issue_if,
+  cv32e40x_if_xif.cpu_commit     xif_commit_if,
+  cv32e40x_if_xif.cpu_mem        xif_mem_if,
+  cv32e40x_if_xif.cpu_mem_result xif_mem_result_if,
+  cv32e40x_if_xif.cpu_result     xif_result_if,
+
+  // Interrupt inputs
+  input  logic [31:0] irq_i,                    // CLINT interrupts + CLINT extension interrupts
+
+  // WFE input
+  input  logic        wu_wfe_i,
+
+  // CLIC Interface
+  input  logic                       clic_irq_i,
+  input  logic [CLIC_ID_WIDTH-1:0]   clic_irq_id_i,
+  input  logic [ 7:0]                clic_irq_level_i,
+  input  logic [ 1:0]                clic_irq_priv_i,
+  input  logic                       clic_irq_shv_i,
+
+
+  // Fencei flush handshake
+  output logic        fencei_flush_req_o,
+  input logic         fencei_flush_ack_i,
+  // Debug Interface
+  input  logic        debug_req_i,
+  output logic        debug_havereset_o,
+  output logic        debug_running_o,
+  output logic        debug_halted_o,
+  output logic        debug_pc_valid_o,
+  output logic [31:0] debug_pc_o,
+
+  // CPU Control Signals
+  input  logic        fetch_enable_i,
+  output logic        core_sleep_o
+
+`ifdef RISCV_FORMAL
+  ,`RVFI_OUTPUTS
+`endif
+);
+
+
+    cv32e40x_core_log
+     #(   .ENABLE                ( CORE_LOG_ENABLE       ),
+          .RV32                  ( RV32                  ),
+          .A_EXT                 ( A_EXT                 ),
+          .B_EXT                 ( B_EXT                 ),
+          .M_EXT                 ( M_EXT                 ),
+          .X_EXT                 ( X_EXT                 ),
+          .X_NUM_RS              ( X_NUM_RS              ),
+          .X_ID_WIDTH            ( X_ID_WIDTH            ),
+          .X_MEM_WIDTH           ( X_MEM_WIDTH           ),
+          .X_RFR_WIDTH           ( X_RFR_WIDTH           ),
+          .X_RFW_WIDTH           ( X_RFW_WIDTH           ),
+          .X_MISA                ( X_MISA                ),
+          .X_ECS_XS              ( X_ECS_XS              ),
+          .NUM_MHPMCOUNTERS      ( NUM_MHPMCOUNTERS      ),
+          .CLIC                  ( CLIC                  ),
+          .CLIC_ID_WIDTH         ( CLIC_ID_WIDTH         ),
+          .DEBUG                 ( DEBUG                 ),
+          .DM_REGION_START       ( DM_REGION_START       ),
+          .DM_REGION_END         ( DM_REGION_END         ),
+          .DBG_NUM_TRIGGERS      ( DBG_NUM_TRIGGERS      ),
+          .PMA_NUM_REGIONS       ( PMA_NUM_REGIONS       ),
+          .PMA_CFG               ( PMA_CFG               )
+     )
+    core_log_i(
+          .clk_i              ( core_i.id_stage_i.clk              ),
+          .ex_wb_pipe_i       ( core_i.ex_wb_pipe                  ),
+          .mhartid_i          ( core_i.mhartid_i                   )
+
+      );
+
+    cv32e40x_rvfi
+      #(.CLIC  (CLIC),
+        .DEBUG (DEBUG),
+        .A_EXT (A_EXT))
+      rvfi_i
+        (.clk_i                    ( clk_i                                                                ),
+         .rst_ni                   ( rst_ni                                                               ),
+
+         // Non-pipeline Probes
+         .m_c_obi_instr_if         ( core_i.m_c_obi_instr_if                                              ),
+
+         // IF Probes
+         .if_valid_i               ( core_i.if_stage_i.if_valid_o                                         ),
+         .pc_if_i                  ( core_i.if_stage_i.pc_if_o                                            ),
+         .instr_pmp_err_if_i       ( 1'b0                          /* PMP not implemented in cv32e40x */  ),
+         .last_op_if_i             ( core_i.if_stage_i.last_op_o                                          ),
+         .abort_op_if_i            ( core_i.if_stage_i.abort_op_o                                         ),
+         .prefetch_valid_if_i      ( core_i.if_stage_i.prefetch_unit_i.prefetch_valid_o                   ),
+         .prefetch_ready_if_i      ( core_i.if_stage_i.prefetch_unit_i.prefetch_ready_i                   ),
+         .prefetch_addr_if_i       ( core_i.if_stage_i.prefetch_unit_i.prefetch_addr_o                    ),
+         .prefetch_compressed_if_i ( core_i.if_stage_i.instr_compressed                                   ),
+         .prefetch_instr_if_i      ( core_i.if_stage_i.prefetch_unit_i.prefetch_instr_o                   ),
+         .clic_ptr_if_i            ( core_i.if_stage_i.prefetch_is_clic_ptr                               ),
+         .mret_ptr_if_i            ( core_i.if_stage_i.prefetch_is_mret_ptr                               ),
+         .mpu_status_i             ( core_i.if_stage_i.mpu_i.core_resp_o.mpu_status                       ),
+         .prefetch_trans_valid_i   ( core_i.if_stage_i.prefetch_trans_valid                               ),
+         .prefetch_trans_ready_i   ( core_i.if_stage_i.prefetch_trans_ready                               ),
+         .prefetch_resp_valid_i    ( core_i.if_stage_i.prefetch_resp_valid                                ),
+
+         // ID Probes
+         .id_valid_i               ( core_i.id_stage_i.id_valid_o                                         ),
+         .id_ready_i               ( core_i.id_stage_i.id_ready_o                                         ),
+         .pc_id_i                  ( core_i.id_stage_i.if_id_pipe_i.pc                                    ),
+         .rf_re_id_i               ( core_i.id_stage_i.rf_re_o                                            ),
+         .sys_mret_id_i            ( core_i.controller_i.controller_fsm_i.sys_mret_id                     ),
+         .tbljmp_id_i              ( core_i.id_stage_i.if_id_pipe_i.instr_meta.tbljmp                     ),
+         .jump_in_id_i             ( core_i.controller_i.controller_fsm_i.jump_in_id                      ),
+         .is_compressed_id_i       ( core_i.id_stage_i.if_id_pipe_i.instr_meta.compressed                 ),
+         .lsu_en_id_i              ( core_i.id_stage_i.lsu_en                                             ),
+         .lsu_we_id_i              ( core_i.id_stage_i.lsu_we                                             ),
+         .lsu_size_id_i            ( core_i.id_stage_i.lsu_size                                           ),
+         .rs1_addr_id_i            ( core_i.register_file_wrapper_i.raddr_i[0]                            ),
+         .rs2_addr_id_i            ( core_i.register_file_wrapper_i.raddr_i[1]                            ),
+         .operand_a_fw_id_i        ( core_i.id_stage_i.operand_a_fw                                       ),
+         .operand_b_fw_id_i        ( core_i.id_stage_i.operand_b_fw                                       ),
+         .first_op_id_i            ( core_i.id_stage_i.if_id_pipe_i.first_op                              ),
+         .clic_ptr_in_id_i         ( core_i.controller_i.controller_fsm_i.clic_ptr_in_id                  ),
+         .mret_ptr_in_id_i         ( core_i.controller_i.controller_fsm_i.mret_ptr_in_id                  ),
+         // EX Probes
+         .ex_ready_i               ( core_i.ex_stage_i.ex_ready_o                                         ),
+         .ex_valid_i               ( core_i.ex_stage_i.ex_valid_o                                         ),
+         .branch_in_ex_i           ( core_i.controller_i.controller_fsm_i.branch_in_ex                    ),
+         .branch_decision_ex_i     ( core_i.ex_stage_i.branch_decision_o                                  ),
+         .dret_in_ex_i             ( core_i.ex_stage_i.id_ex_pipe_i.sys_dret_insn                         ),
+         .lsu_en_ex_i              ( core_i.ex_stage_i.id_ex_pipe_i.lsu_en                                ),
+         .lsu_pmp_err_ex_i         ( 1'b0                          /* PMP not implemented in cv32e40x */  ),
+         .lsu_pma_err_ex_i         ( core_i.load_store_unit_i.mpu_i.pma_i.pma_err_o                       ),
+         .lsu_pma_atomic_ex_i      ( core_i.load_store_unit_i.mpu_i.pma_i.atomic_access_i                 ),
+         .lsu_pma_cfg_ex_i         ( core_i.load_store_unit_i.mpu_i.pma_i.pma_cfg                         ),
+         .lsu_misaligned_ex_i      ( core_i.load_store_unit_i.misaligned_access                           ),
+         .buffer_trans_ex_i        ( core_i.load_store_unit_i.buffer_trans                                ),
+         .buffer_trans_valid_ex_i  ( core_i.load_store_unit_i.buffer_trans_valid                          ),
+         .lsu_split_q_ex_i         ( core_i.load_store_unit_i.split_q                                     ),
+         .lsu_split_0_ex_i         ( core_i.load_store_unit_i.lsu_split_0_o                               ),
+
+         // WB Probes
+         .wb_valid_i               ( core_i.wb_stage_i.wb_valid_o                                         ),
+         .wb_ready_i               ( core_i.wb_stage_i.wb_ready_o                                         ),
+         .pc_wb_i                  ( core_i.wb_stage_i.ex_wb_pipe_i.pc                                    ),
+         .instr_rdata_wb_i         ( core_i.wb_stage_i.ex_wb_pipe_i.instr.bus_resp.rdata                  ),
+         .ebreak_in_wb_i           ( core_i.controller_i.controller_fsm_i.ebreak_in_wb                    ),
+         .csr_en_wb_i              ( core_i.wb_stage_i.ex_wb_pipe_i.csr_en                                ),
+         .sys_wfi_insn_wb_i        ( core_i.wb_stage_i.ex_wb_pipe_i.sys_wfi_insn                          ),
+         .sys_en_wb_i              ( core_i.wb_stage_i.ex_wb_pipe_i.sys_en                                ),
+         .last_op_wb_i             ( core_i.wb_stage_i.last_op_o                                          ),
+         .first_op_wb_i            ( core_i.wb_stage_i.ex_wb_pipe_i.first_op                              ),
+         .rf_we_wb_i               ( core_i.wb_stage_i.rf_we_wb_o                                         ),
+         .rf_addr_wb_i             ( core_i.wb_stage_i.rf_waddr_wb_o                                      ),
+         .rf_wdata_wb_i            ( core_i.wb_stage_i.rf_wdata_wb_o                                      ),
+         .lsu_rdata_wb_i           ( core_i.load_store_unit_i.lsu_rdata_1_o                               ),
+         .lsu_exokay_wb_i          ( core_i.load_store_unit_i.resp.bus_resp.exokay                        ),
+         .lsu_err_wb_i             ( core_i.load_store_unit_i.lsu_err_1_o                                 ),
+         .abort_op_wb_i            ( core_i.wb_stage_i.abort_op_o                                         ),
+         .clic_ptr_wb_i            ( core_i.wb_stage_i.ex_wb_pipe_i.instr_meta.clic_ptr                   ),
+         .mret_ptr_wb_i            ( core_i.wb_stage_i.ex_wb_pipe_i.instr_meta.mret_ptr                   ),
+         .wpt_match_wb_i           ( core_i.wb_stage_i.wpt_match_wb_o                                     ),
+         .mpu_status_wb_i          ( core_i.wb_stage_i.mpu_status_wb_o                                    ),
+         .align_status_wb_i        ( core_i.wb_stage_i.align_status_wb_o                                  ),
+         .csr_mscratchcsw_in_wb_i  ( 1'b0                             /* Not implemented in cv32e40x */   ),
+         .csr_mscratchcswl_in_wb_i ( core_i.cs_registers_i.mscratchcswl_in_wb                             ),
+         .csr_mnxti_in_wb_i        ( core_i.cs_registers_i.mnxti_in_wb                                    ),
+
+         .branch_addr_n_i          ( core_i.if_stage_i.branch_addr_n                                      ),
+
+         .priv_lvl_i               ( PRIV_LVL_M                       /* Not implemented in cv32e40x */   ),
+         .ctrl_fsm_i               ( core_i.ctrl_fsm                                                      ),
+         .ctrl_fsm_cs_i            ( core_i.controller_i.controller_fsm_i.ctrl_fsm_cs                     ),
+         .ctrl_fsm_ns_i            ( core_i.controller_i.controller_fsm_i.ctrl_fsm_ns                     ),
+         .pending_single_step_i    ( core_i.controller_i.controller_fsm_i.pending_single_step             ),
+         .single_step_allowed_i    ( core_i.controller_i.controller_fsm_i.single_step_allowed             ),
+         .nmi_pending_i            ( core_i.controller_i.controller_fsm_i.nmi_pending_q                   ),
+         .nmi_is_store_i           ( core_i.controller_i.controller_fsm_i.nmi_is_store_q                  ),
+         .debug_mode_q_i           ( core_i.controller_i.controller_fsm_i.debug_mode_q                    ),
+         .debug_cause_n_i          ( core_i.controller_i.controller_fsm_i.debug_cause_n                   ),
+         .etrigger_in_wb_i         ( core_i.controller_i.controller_fsm_i.etrigger_in_wb                  ),
+         .irq_i                    ( core_i.irq_i & IRQ_MASK                                              ),
+         .irq_wu_ctrl_i            ( core_i.irq_wu_ctrl                                                   ),
+         .irq_id_ctrl_i            ( core_i.irq_id_ctrl                                                   ),
+
+         // CSRs
+         .csr_jvt_n_i              ( core_i.cs_registers_i.jvt_n                                          ),
+         .csr_jvt_q_i              ( core_i.cs_registers_i.jvt_rdata                                      ),
+         .csr_jvt_we_i             ( core_i.cs_registers_i.jvt_we                                         ),
+         .csr_mstatus_n_i          ( core_i.cs_registers_i.mstatus_n                                      ),
+         .csr_mstatus_q_i          ( core_i.cs_registers_i.mstatus_rdata                                  ),
+         .csr_mstatus_we_i         ( core_i.cs_registers_i.mstatus_we                                     ),
+         .csr_misa_n_i             ( core_i.cs_registers_i.misa_n                                         ),
+         .csr_misa_q_i             ( core_i.cs_registers_i.misa_rdata                                     ),
+         .csr_misa_we_i            ( core_i.cs_registers_i.misa_we                                        ),
+         .csr_mie_n_i              ( core_i.cs_registers_i.mie_n                                          ),
+         .csr_mie_q_i              ( core_i.cs_registers_i.mie_rdata                                      ),
+         .csr_mie_we_i             ( core_i.cs_registers_i.mie_we                                         ),
+         .csr_mtvec_n_i            ( core_i.cs_registers_i.mtvec_n                                        ),
+         .csr_mtvec_q_i            ( core_i.cs_registers_i.mtvec_rdata                                    ),
+         .csr_mtvec_we_i           ( core_i.cs_registers_i.mtvec_we                                       ),
+         .csr_mtvt_n_i             ( core_i.cs_registers_i.mtvt_n                                         ),
+         .csr_mtvt_q_i             ( core_i.cs_registers_i.mtvt_rdata                                     ),
+         .csr_mtvt_we_i            ( core_i.cs_registers_i.mtvt_we                                        ),
+         .csr_mcountinhibit_n_i    ( core_i.cs_registers_i.mcountinhibit_n                                ),
+         .csr_mcountinhibit_q_i    ( core_i.cs_registers_i.mcountinhibit_rdata                            ),
+         .csr_mcountinhibit_we_i   ( core_i.cs_registers_i.mcountinhibit_we                               ),
+         .csr_mhpmevent_n_i        ( core_i.cs_registers_i.mhpmevent_n                                    ),
+         .csr_mhpmevent_q_i        ( core_i.cs_registers_i.mhpmevent_rdata                                ),
+         .csr_mhpmevent_we_i       ( {31'h0, core_i.cs_registers_i.mhpmevent_we} <<
+                                     core_i.cs_registers_i.csr_waddr[4:0] ),
+         .csr_mscratch_n_i         ( core_i.cs_registers_i.mscratch_n                                     ),
+         .csr_mscratch_q_i         ( core_i.cs_registers_i.mscratch_rdata                                 ),
+         .csr_mscratch_we_i        ( core_i.cs_registers_i.mscratch_we                                    ),
+         .csr_mepc_n_i             ( core_i.cs_registers_i.mepc_n                                         ),
+         .csr_mepc_q_i             ( core_i.cs_registers_i.mepc_rdata                                     ),
+         .csr_mepc_we_i            ( core_i.cs_registers_i.mepc_we                                        ),
+         .csr_mcause_n_i           ( core_i.cs_registers_i.mcause_n                                       ),
+         .csr_mcause_q_i           ( core_i.cs_registers_i.mcause_rdata                                   ),
+         .csr_mcause_we_i          ( core_i.cs_registers_i.mcause_we                                      ),
+         .csr_mip_n_i              ( core_i.cs_registers_i.mip_n                                          ),
+         .csr_mip_q_i              ( core_i.cs_registers_i.mip_rdata                                      ),
+         .csr_mip_we_i             ( core_i.cs_registers_i.mip_we                                         ),
+         .csr_mnxti_n_i            ( core_i.cs_registers_i.mnxti_n                                        ),
+         .csr_mnxti_q_i            ( core_i.cs_registers_i.mnxti_rdata                                    ),
+         .csr_mnxti_we_i           ( core_i.cs_registers_i.mnxti_we                                       ),
+         .csr_mintstatus_n_i       ( core_i.cs_registers_i.mintstatus_n                                   ),
+         .csr_mintstatus_q_i       ( core_i.cs_registers_i.mintstatus_rdata                               ),
+         .csr_mintstatus_we_i      ( core_i.cs_registers_i.mintstatus_we                                  ),
+         .csr_mintthresh_n_i       ( core_i.cs_registers_i.mintthresh_n                                   ),
+         .csr_mintthresh_q_i       ( core_i.cs_registers_i.mintthresh_rdata                               ),
+         .csr_mintthresh_we_i      ( core_i.cs_registers_i.mintthresh_we                                  ),
+         .csr_mscratchcsw_n_i      ( 32'd0                              /* Not implemented in cv32e40x */ ),
+         .csr_mscratchcsw_q_i      ( 32'd0                              /* Not implemented in cv32e40x */ ),
+         .csr_mscratchcsw_we_i     (  1'b0                              /* Not implemented in cv32e40x */ ),
+         .csr_mscratchcswl_n_i     ( core_i.cs_registers_i.mscratchcswl_n                                 ),
+         .csr_mscratchcswl_q_i     ( core_i.cs_registers_i.mscratchcswl_rdata                             ),
+         .csr_mscratchcswl_we_i    ( core_i.cs_registers_i.mscratchcswl_we                                ),
+         .csr_tdata1_n_i           ( core_i.cs_registers_i.debug_triggers_i.tdata1_n_r                    ),
+         .csr_tdata1_q_i           ( core_i.cs_registers_i.tdata1_rdata                                   ),
+         .csr_tdata1_we_i          ( core_i.cs_registers_i.debug_triggers_i.tdata1_we_r                   ),
+         .csr_tdata2_n_i           ( core_i.cs_registers_i.debug_triggers_i.tdata2_n_r                    ),
+         .csr_tdata2_q_i           ( core_i.cs_registers_i.tdata2_rdata                                   ),
+         .csr_tdata2_we_i          ( core_i.cs_registers_i.debug_triggers_i.tdata2_we_r                   ),
+         .csr_tinfo_n_i            ( core_i.cs_registers_i.debug_triggers_i.tinfo_n                       ),
+         .csr_tinfo_q_i            ( core_i.cs_registers_i.tinfo_rdata                                    ),
+         .csr_tinfo_we_i           ( core_i.cs_registers_i.tinfo_we                                       ),
+         .csr_dcsr_n_i             ( core_i.cs_registers_i.dcsr_n                                         ),
+         .csr_dcsr_q_i             ( core_i.cs_registers_i.dcsr_rdata                                     ),
+         .csr_dcsr_we_i            ( core_i.cs_registers_i.dcsr_we                                        ),
+         .csr_dpc_n_i              ( core_i.cs_registers_i.dpc_n                                          ),
+         .csr_dpc_q_i              ( core_i.cs_registers_i.dpc_rdata                                      ),
+         .csr_dpc_we_i             ( core_i.cs_registers_i.dpc_we                                         ),
+         .csr_dscratch0_n_i        ( core_i.cs_registers_i.dscratch0_n                                    ),
+         .csr_dscratch0_q_i        ( core_i.cs_registers_i.dscratch0_rdata                                ),
+         .csr_dscratch0_we_i       ( core_i.cs_registers_i.dscratch0_we                                   ),
+         .csr_dscratch1_n_i        ( core_i.cs_registers_i.dscratch1_n                                    ),
+         .csr_dscratch1_q_i        ( core_i.cs_registers_i.dscratch1_rdata                                ),
+         .csr_dscratch1_we_i       ( core_i.cs_registers_i.dscratch1_we                                   ),
+         .csr_mhpmcounter_n_i      ( core_i.cs_registers_i.mhpmcounter_n                                  ),
+         .csr_mhpmcounter_q_i      ( core_i.cs_registers_i.mhpmcounter_rdata                              ),
+         .csr_mhpmcounter_we_i     ( core_i.cs_registers_i.mhpmcounter_we                                 ),
+         .csr_mvendorid_i          ( core_i.cs_registers_i.mvendorid_rdata                                ),
+         .csr_marchid_i            ( core_i.cs_registers_i.marchid_rdata                                  ),
+         .csr_mhartid_i            ( core_i.cs_registers_i.mhartid_rdata                                  ),
+         .csr_mimpid_i             ( core_i.cs_registers_i.mimpid_rdata                                   ),
+         .csr_mstatush_n_i         ( core_i.cs_registers_i.mstatush_n                                     ),
+         .csr_mstatush_q_i         ( core_i.cs_registers_i.mstatush_rdata                                 ),
+         .csr_mstatush_we_i        ( core_i.cs_registers_i.mstatush_we                                    ),
+         .csr_tselect_n_i          ( core_i.cs_registers_i.debug_triggers_i.tselect_n                     ),
+         .csr_tselect_q_i          ( core_i.cs_registers_i.tselect_rdata                                  ),
+         .csr_tselect_we_i         ( core_i.cs_registers_i.tselect_we                                     ),
+         .csr_mconfigptr_n_i       ( core_i.cs_registers_i.mconfigptr_n                                   ),
+         .csr_mconfigptr_q_i       ( core_i.cs_registers_i.mconfigptr_rdata                               ),
+         .csr_mconfigptr_we_i      ( core_i.cs_registers_i.mconfigptr_we                                  ),
+         .csr_mcounteren_n_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mcounteren_q_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mcounteren_we_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_pmpcfg_n_i           ( '{16{8'h0}}                           /* Not supported in cv32e40x*/ ),
+         .csr_pmpcfg_q_i           ( '{16{8'h0}}                           /* Not supported in cv32e40x*/ ),
+         .csr_pmpcfg_we_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_pmpaddr_n_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_pmpaddr_q_i          ( '{16{32'h0}}                          /* Not supported in cv32e40x*/ ),
+         .csr_pmpaddr_we_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfg_n_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfg_q_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfg_we_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfgh_n_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfgh_q_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mseccfgh_we_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfg_n_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfg_q_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfg_we_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfgh_n_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfgh_q_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_menvcfgh_we_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_cpuctrl_n_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_cpuctrl_q_i          ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_cpuctrl_we_i         ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed0_n_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed0_q_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed0_we_i     ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed1_n_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed1_q_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed1_we_i     ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed2_n_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed2_q_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_secureseed2_we_i     ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0_n_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0_q_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0_we_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1_n_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1_q_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1_we_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2_n_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2_q_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2_we_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3_n_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3_q_i        ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3_we_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0h_n_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0h_q_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen0h_we_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1h_n_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1h_q_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen1h_we_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2h_n_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2h_q_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen2h_we_i      ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3h_n_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3h_q_i       ( '0                                    /* Not supported in cv32e40x*/ ),
+         .csr_mstateen3h_we_i      ( '0                                    /* Not supported in cv32e40x*/ )
+
+
+`ifdef RISCV_FORMAL
+         ,`RVFI_CONN
+`else
+         ,`RVFI_TIEOFF
+`endif
+         );
+
+
+    // instantiate the core
+    cv32e40x_core
+        #(
+          .LIB                   ( LIB                   ),
+          .RV32                  ( RV32                  ),
+          .A_EXT                 ( A_EXT                 ),
+          .B_EXT                 ( B_EXT                 ),
+          .M_EXT                 ( M_EXT                 ),
+          .X_EXT                 ( X_EXT                 ),
+          .X_NUM_RS              ( X_NUM_RS              ),
+          .X_ID_WIDTH            ( X_ID_WIDTH            ),
+          .X_MEM_WIDTH           ( X_MEM_WIDTH           ),
+          .X_RFR_WIDTH           ( X_RFR_WIDTH           ),
+          .X_RFW_WIDTH           ( X_RFW_WIDTH           ),
+          .X_MISA                ( X_MISA                ),
+          .X_ECS_XS              ( X_ECS_XS              ),
+          .NUM_MHPMCOUNTERS      ( NUM_MHPMCOUNTERS      ),
+          .CLIC                  ( CLIC                  ),
+          .CLIC_ID_WIDTH         ( CLIC_ID_WIDTH         ),
+          .DEBUG                 ( DEBUG                 ),
+          .DM_REGION_START       ( DM_REGION_START       ),
+          .DM_REGION_END         ( DM_REGION_END         ),
+          .DBG_NUM_TRIGGERS      ( DBG_NUM_TRIGGERS      ),
+          .PMA_NUM_REGIONS       ( PMA_NUM_REGIONS       ),
+          .PMA_CFG               ( PMA_CFG               ))
+    core_i (
+            .xif_compressed_if(xif_compressed_if),
+            .xif_issue_if(xif_issue_if),
+            .xif_commit_if(xif_commit_if),
+            .xif_mem_if(xif_mem_if),
+            .xif_mem_result_if(xif_mem_result_if),
+            .xif_result_if(xif_result_if),
+            .*);
+
 `ifndef COREV_ASSERT_OFF
 
-  // id_stage_sva only checks rs1 and rs2.
+  // Explicit assertion instances replace bind statements for tool compatibility.
+  localparam int unsigned LSU_ASSERT_DEPTH = 2;
+
   wire rf_addr_t id_stage_rf_raddr[2];
 
   assign id_stage_rf_raddr[0] = core_i.id_stage_i.rf_raddr_o[0];
   assign id_stage_rf_raddr[1] = core_i.id_stage_i.rf_raddr_o[1];
+
+  cv32e40x_parameter_sva #(
+    .PMA_NUM_REGIONS  (PMA_NUM_REGIONS),
+    .PMA_CFG          (PMA_CFG),
+    .DM_REGION_START  (DM_REGION_START),
+    .DM_REGION_END    (DM_REGION_END),
+    .DBG_NUM_TRIGGERS (DBG_NUM_TRIGGERS),
+    .CLIC_ID_WIDTH    (CLIC_ID_WIDTH),
+    .NUM_MHPMCOUNTERS (NUM_MHPMCOUNTERS)
+  ) param_sva (
+    .clk_i  (clk_i),
+    .rst_ni (rst_ni)
+  );
 
   cv32e40x_if_stage_sva #(
     .CLIC (CLIC)
@@ -30,38 +544,910 @@
   cv32e40x_id_stage_sva #(
     .RV32 (RV32)
   ) id_stage_sva (
-    .clk                    (core_i.id_stage_i.clk),
-    .rst_n                  (core_i.id_stage_i.rst_n),
-    .rf_re                  (core_i.id_stage_i.rf_re),
-    .rf_raddr_o             (id_stage_rf_raddr),
-    .rf_we                  (core_i.id_stage_i.rf_we),
-    .rf_we_dec              (core_i.id_stage_i.rf_we_dec),
-    .rf_waddr               (core_i.id_stage_i.rf_waddr),
-    .alu_en                 (core_i.id_stage_i.alu_en),
-    .div_en                 (core_i.id_stage_i.div_en),
-    .mul_en                 (core_i.id_stage_i.mul_en),
-    .csr_en                 (core_i.id_stage_i.csr_en),
-    .sys_en                 (core_i.id_stage_i.sys_en),
-    .lsu_en                 (core_i.id_stage_i.lsu_en),
-    .xif_en                 (core_i.id_stage_i.xif_en),
-    .alu_op_a_mux_sel       (core_i.id_stage_i.alu_op_a_mux_sel),
-    .alu_op_b_mux_sel       (core_i.id_stage_i.alu_op_b_mux_sel),
-    .op_c_mux_sel           (core_i.id_stage_i.op_c_mux_sel),
-    .ex_ready_i             (core_i.id_stage_i.ex_ready_i),
-    .illegal_insn           (core_i.id_stage_i.illegal_insn),
-    .csr_op                 (core_i.id_stage_i.csr_op),
-    .id_ex_pipe_o           (core_i.id_stage_i.id_ex_pipe_o),
-    .id_ready_o             (core_i.id_stage_i.id_ready_o),
-    .id_valid_o             (core_i.id_stage_i.id_valid_o),
-    .ctrl_fsm_i             (core_i.id_stage_i.ctrl_fsm_i),
-    .xif_insn_accept        (core_i.id_stage_i.xif_insn_accept),
-    .jalr_fw                (core_i.id_stage_i.jalr_fw),
-    .operand_a_fw           (core_i.id_stage_i.operand_a_fw),
-    .alu_jmpr               (core_i.id_stage_i.alu_jmpr),
-    .jmp_target_o           (core_i.id_stage_i.jmp_target_o),
-    .jmp_taken_id_ctrl_i    (
-      core_i.controller_i.controller_fsm_i.jump_taken_id
+    .clk                 (core_i.id_stage_i.clk),
+    .rst_n               (core_i.id_stage_i.rst_n),
+    .rf_re               (core_i.id_stage_i.rf_re),
+    .rf_raddr_o          (id_stage_rf_raddr),
+    .rf_we               (core_i.id_stage_i.rf_we),
+    .rf_we_dec           (core_i.id_stage_i.rf_we_dec),
+    .rf_waddr            (core_i.id_stage_i.rf_waddr),
+    .alu_en              (core_i.id_stage_i.alu_en),
+    .div_en              (core_i.id_stage_i.div_en),
+    .mul_en              (core_i.id_stage_i.mul_en),
+    .csr_en              (core_i.id_stage_i.csr_en),
+    .sys_en              (core_i.id_stage_i.sys_en),
+    .lsu_en              (core_i.id_stage_i.lsu_en),
+    .xif_en              (core_i.id_stage_i.xif_en),
+    .alu_op_a_mux_sel    (core_i.id_stage_i.alu_op_a_mux_sel),
+    .alu_op_b_mux_sel    (core_i.id_stage_i.alu_op_b_mux_sel),
+    .op_c_mux_sel        (core_i.id_stage_i.op_c_mux_sel),
+    .ex_ready_i          (core_i.id_stage_i.ex_ready_i),
+    .illegal_insn        (core_i.id_stage_i.illegal_insn),
+    .csr_op              (core_i.id_stage_i.csr_op),
+    .id_ex_pipe_o        (core_i.id_stage_i.id_ex_pipe_o),
+    .id_ready_o          (core_i.id_stage_i.id_ready_o),
+    .id_valid_o          (core_i.id_stage_i.id_valid_o),
+    .ctrl_fsm_i          (core_i.id_stage_i.ctrl_fsm_i),
+    .xif_insn_accept     (core_i.id_stage_i.xif_insn_accept),
+    .jalr_fw             (core_i.id_stage_i.jalr_fw),
+    .operand_a_fw        (core_i.id_stage_i.operand_a_fw),
+    .alu_jmpr            (core_i.id_stage_i.alu_jmpr),
+    .jmp_target_o        (core_i.id_stage_i.jmp_target_o),
+    .jmp_taken_id_ctrl_i (core_i.controller_i.controller_fsm_i.jump_taken_id)
+  );
+
+  cv32e40x_ex_stage_sva #(
+    .X_EXT (X_EXT)
+  ) ex_stage_sva (
+    .clk                    (core_i.ex_stage_i.clk),
+    .rst_n                  (core_i.ex_stage_i.rst_n),
+    .ex_ready_o             (core_i.ex_stage_i.ex_ready_o),
+    .ex_valid_o             (core_i.ex_stage_i.ex_valid_o),
+    .wb_ready_i             (core_i.ex_stage_i.wb_ready_i),
+    .wb_valid_i             (core_i.wb_valid),
+    .ctrl_fsm_i             (core_i.ex_stage_i.ctrl_fsm_i),
+    .id_ex_pipe_i           (core_i.ex_stage_i.id_ex_pipe_i),
+    .ex_wb_pipe_o           (core_i.ex_stage_i.ex_wb_pipe_o),
+    .lsu_split_i            (core_i.ex_stage_i.lsu_split_i),
+    .csr_illegal_i          (core_i.ex_stage_i.csr_illegal_i),
+    .branch_target_o        (core_i.ex_stage_i.branch_target_o),
+    .branch_taken_ex_ctrl_i (core_i.controller_i.controller_fsm_i.branch_taken_ex),
+    .last_op_o              (core_i.ex_stage_i.last_op_o)
+  );
+
+  cv32e40x_wb_stage_sva #(
+    .DEBUG (DEBUG)
+  ) wb_stage_sva (
+    .clk              (core_i.wb_stage_i.clk),
+    .rst_n            (core_i.wb_stage_i.rst_n),
+    .wb_ready_o       (core_i.wb_stage_i.wb_ready_o),
+    .wb_valid         (core_i.wb_stage_i.wb_valid),
+    .ctrl_fsm_i       (core_i.wb_stage_i.ctrl_fsm_i),
+    .ex_wb_pipe_i     (core_i.wb_stage_i.ex_wb_pipe_i),
+    .lsu_mpu_status_i (core_i.wb_stage_i.lsu_mpu_status_i),
+    .lsu_mpu_status_q (core_i.wb_stage_i.lsu_mpu_status_q),
+    .lsu_wpt_match_i  (core_i.wb_stage_i.lsu_wpt_match_i),
+    .rf_we_wb_o       (core_i.wb_stage_i.rf_we_wb_o),
+    .lsu_valid_q      (core_i.wb_stage_i.lsu_valid_q),
+    .lsu_wpt_match_q  (core_i.wb_stage_i.lsu_wpt_match_q),
+    .lsu_valid_i      (core_i.wb_stage_i.lsu_valid_i)
+  );
+
+  cv32e40x_dbg_helper dbg_help_i (
+    .instr         (core_i.id_stage_i.instr),
+    .is_compressed (core_i.id_stage_i.if_id_pipe_i.instr_meta.compressed),
+    .rf_re         (core_i.rf_re_id),
+    .rf_raddr      (core_i.rf_raddr_id),
+    .rf_we         (core_i.id_stage_i.rf_we),
+    .rf_waddr      (core_i.id_stage_i.rf_waddr),
+    .illegal_insn  (core_i.id_stage_i.illegal_insn)
+  );
+
+  cv32e40x_register_file_sva #(
+    .RV32 (RV32)
+  ) register_file_sva (
+    .clk     (core_i.register_file_wrapper_i.register_file_i.clk),
+    .rst_n   (core_i.register_file_wrapper_i.register_file_i.rst_n),
+    .waddr_i (core_i.register_file_wrapper_i.register_file_i.waddr_i),
+    .we_i    (core_i.register_file_wrapper_i.register_file_i.we_i)
+  );
+
+  cv32e40x_controller_fsm_sva #(
+    .X_EXT         (X_EXT),
+    .DEBUG         (DEBUG),
+    .CLIC          (CLIC),
+    .CLIC_ID_WIDTH (CLIC_ID_WIDTH),
+    .RV32          (RV32)
+  ) controller_fsm_sva (
+    .clk                         (core_i.controller_i.controller_fsm_i.clk),
+    .rst_n                       (core_i.controller_i.controller_fsm_i.rst_n),
+    .debug_mode_q                (core_i.controller_i.controller_fsm_i.debug_mode_q),
+    .ctrl_fsm_o                  (core_i.controller_i.controller_fsm_i.ctrl_fsm_o),
+    .ctrl_byp_i                  (core_i.controller_i.controller_fsm_i.ctrl_byp_i),
+    .jump_taken_id               (core_i.controller_i.controller_fsm_i.jump_taken_id),
+    .branch_taken_ex             (core_i.controller_i.controller_fsm_i.branch_taken_ex),
+    .branch_decision_ex_i        (core_i.controller_i.controller_fsm_i.branch_decision_ex_i),
+    .ctrl_fsm_cs                 (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .ctrl_fsm_ns                 (core_i.controller_i.controller_fsm_i.ctrl_fsm_ns),
+    .lsu_outstanding_cnt         (core_i.load_store_unit_i.cnt_q),
+    .mpu_status_wb_i             (core_i.controller_i.controller_fsm_i.mpu_status_wb_i),
+    .if_valid_i                  (core_i.controller_i.controller_fsm_i.if_valid_i),
+    .if_id_pipe_i                (core_i.controller_i.controller_fsm_i.if_id_pipe_i),
+    .id_ex_pipe_i                (core_i.controller_i.controller_fsm_i.id_ex_pipe_i),
+    .ex_wb_pipe_i                (core_i.controller_i.controller_fsm_i.ex_wb_pipe_i),
+    .ex_valid_i                  (core_i.controller_i.controller_fsm_i.ex_valid_i),
+    .wb_ready_i                  (core_i.controller_i.controller_fsm_i.wb_ready_i),
+    .mret_in_wb                  (core_i.controller_i.controller_fsm_i.mret_in_wb),
+    .exception_in_wb             (core_i.controller_i.controller_fsm_i.exception_in_wb),
+    .exception_cause_wb          (core_i.controller_i.controller_fsm_i.exception_cause_wb),
+    .rf_we_wb_i                  (core_i.wb_stage_i.rf_we_wb_o),
+    .csr_we_i                    (core_i.cs_registers_i.csr_we_int),
+    .csr_illegal_i               (core_i.cs_registers_i.csr_illegal_o),
+    .pending_single_step         (core_i.controller_i.controller_fsm_i.pending_single_step),
+    .trigger_match_in_wb         (core_i.controller_i.controller_fsm_i.trigger_match_in_wb),
+    .lsu_err_wb_i                (core_i.controller_i.controller_fsm_i.lsu_err_wb_i),
+    .wb_valid_i                  (core_i.controller_i.controller_fsm_i.wb_valid_i),
+    .fencei_in_wb                (core_i.controller_i.controller_fsm_i.fencei_in_wb),
+    .fencei_flush_req_o          (core_i.controller_i.controller_fsm_i.fencei_flush_req_o),
+    .fencei_flush_ack_i          (core_i.controller_i.controller_fsm_i.fencei_flush_ack_i),
+    .fencei_req_and_ack_q        (core_i.controller_i.controller_fsm_i.fencei_req_and_ack_q),
+    .pending_async_debug         (core_i.controller_i.controller_fsm_i.pending_async_debug),
+    .pending_sync_debug          (core_i.controller_i.controller_fsm_i.pending_sync_debug),
+    .async_debug_allowed         (core_i.controller_i.controller_fsm_i.async_debug_allowed),
+    .sync_debug_allowed          (core_i.controller_i.controller_fsm_i.sync_debug_allowed),
+    .pending_interrupt           (core_i.controller_i.controller_fsm_i.pending_interrupt),
+    .interrupt_allowed           (core_i.controller_i.controller_fsm_i.interrupt_allowed),
+    .pending_nmi                 (core_i.controller_i.controller_fsm_i.pending_nmi),
+    .nmi_allowed                 (core_i.controller_i.controller_fsm_i.nmi_allowed),
+    .lsu_busy_i                  (core_i.controller_i.controller_fsm_i.lsu_busy_i),
+    .xif_commit_kill             (core_i.xif_commit_if.commit.commit_kill),
+    .xif_commit_valid            (core_i.xif_commit_if.commit_valid),
+    .nmi_is_store_q              (core_i.controller_i.controller_fsm_i.nmi_is_store_q),
+    .nmi_pending_q               (core_i.controller_i.controller_fsm_i.nmi_pending_q),
+    .dcsr_i                      (core_i.controller_i.controller_fsm_i.dcsr_i),
+    .irq_clic_shv_i              (core_i.controller_i.controller_fsm_i.irq_clic_shv_i),
+    .last_op_wb_i                (core_i.controller_i.controller_fsm_i.last_op_wb_i),
+    .abort_op_wb_i               (core_i.controller_i.controller_fsm_i.abort_op_wb_i),
+    .csr_wr_in_wb_flush_i        (core_i.controller_i.controller_fsm_i.csr_wr_in_wb_flush_i),
+    .debug_cause_q               (core_i.controller_i.controller_fsm_i.debug_cause_q),
+    .id_valid_i                  (core_i.controller_i.controller_fsm_i.id_valid_i),
+    .first_op_if_i               (core_i.if_stage_i.first_op),
+    .first_op_id_i               (core_i.controller_i.controller_fsm_i.first_op_id_i),
+    .first_op_ex_i               (core_i.ex_stage_i.first_op),
+    .last_op_id_i                (core_i.controller_i.controller_fsm_i.last_op_id_i),
+    .ex_ready_i                  (core_i.controller_i.controller_fsm_i.ex_ready_i),
+    .id_ready_i                  (core_i.controller_i.controller_fsm_i.id_ready_i),
+    .sequence_interruptible      (core_i.controller_i.controller_fsm_i.sequence_interruptible),
+    .sequence_in_progress_wb     (core_i.controller_i.controller_fsm_i.sequence_in_progress_wb),
+    .id_stage_haltable           (core_i.controller_i.controller_fsm_i.id_stage_haltable),
+    .prefetch_valid_if_i         (core_i.if_stage_i.prefetch_valid),
+    .prefetch_is_tbljmp_ptr_if_i (core_i.if_stage_i.prefetch_is_tbljmp_ptr),
+    .prefetch_is_mret_ptr_if_i   (core_i.if_stage_i.prefetch_is_mret_ptr),
+    .prefetch_is_clic_ptr_if_i   (core_i.if_stage_i.prefetch_is_clic_ptr),
+    .abort_op_id_i               (core_i.controller_i.controller_fsm_i.abort_op_id_i),
+    .mcause_i                    (core_i.controller_i.controller_fsm_i.mcause_i),
+    .lsu_trans_valid_i           (core_i.load_store_unit_i.trans_valid),
+    .irq_wu_ctrl_i               (core_i.controller_i.controller_fsm_i.irq_wu_ctrl_i),
+    .wu_wfe_i                    (core_i.controller_i.controller_fsm_i.wu_wfe_i),
+    .sys_en_id_i                 (core_i.controller_i.controller_fsm_i.sys_en_id_i),
+    .sys_mret_id_i               (core_i.controller_i.controller_fsm_i.sys_mret_id_i),
+    .mret_ptr_in_wb              (core_i.controller_i.controller_fsm_i.mret_ptr_in_wb),
+    .clic_ptr_in_wb              (core_i.controller_i.controller_fsm_i.clic_ptr_in_wb),
+    .csr_en_id_i                 (core_i.id_stage_i.csr_en),
+    .clic_ptr_in_progress_id_set (core_i.controller_i.controller_fsm_i.clic_ptr_in_progress_id_set),
+    .clic_ptr_in_progress_id     (core_i.controller_i.controller_fsm_i.clic_ptr_in_progress_id),
+    .pipe_pc_mux_ctrl            (core_i.controller_i.controller_fsm_i.pipe_pc_mux_ctrl),
+    .ptr_in_if_i                 (core_i.if_stage_i.ptr_in_if_o),
+    .etrigger_in_wb              (core_i.controller_i.controller_fsm_i.etrigger_in_wb),
+    .etrigger_wb_i               (core_i.controller_i.controller_fsm_i.etrigger_wb_i),
+    .wpt_match_wb_i              (core_i.controller_i.controller_fsm_i.wpt_match_wb_i),
+    .debug_req_i                 (core_i.controller_i.controller_fsm_i.debug_req_i),
+    .fetch_enable_i              (core_i.controller_i.controller_fsm_i.fetch_enable_i),
+    .instr_req_o                 (core_i.instr_req_o),
+    .instr_dbg_o                 (core_i.instr_dbg_o),
+    .wfe_in_wb                   (core_i.controller_i.controller_fsm_i.wfe_in_wb),
+    .mstatus_i                   (core_i.cs_registers_i.mstatus_rdata),
+    .woke_to_interrupt_q         (core_i.controller_i.controller_fsm_i.woke_to_interrupt_q),
+    .woke_to_debug_q             (core_i.controller_i.controller_fsm_i.woke_to_debug_q),
+    .ebreak_in_wb                (core_i.controller_i.controller_fsm_i.ebreak_in_wb),
+    .mintstatus_i                (core_i.controller_i.controller_fsm_i.mintstatus_i),
+    .exception_allowed           (core_i.controller_i.controller_fsm_i.exception_allowed),
+    .wfi_in_wb                   (core_i.controller_i.controller_fsm_i.wfi_in_wb),
+    .fence_in_wb                 (core_i.controller_i.controller_fsm_i.fence_in_wb),
+    .dret_in_wb                  (core_i.controller_i.controller_fsm_i.dret_in_wb),
+    .csr_flush_ack_q             (core_i.controller_i.controller_fsm_i.csr_flush_ack_q),
+    .clic_ptr_in_id              (core_i.controller_i.controller_fsm_i.clic_ptr_in_id),
+    .mret_ptr_in_id              (core_i.controller_i.controller_fsm_i.mret_ptr_in_id),
+    .alu_jmpr_id_i               (core_i.alu_jmpr_id),
+    .jalr_fw_id_i                (core_i.id_stage_i.jalr_fw),
+    .rf_mem_i                    (core_i.register_file_wrapper_i.register_file_i.mem),
+    .response_filter_bus_cnt_q_i (core_i.load_store_unit_i.response_filter_i.bus_cnt_q),
+    .non_shv_irq_ack             (core_i.controller_i.controller_fsm_i.non_shv_irq_ack)
+  );
+
+  cv32e40x_cs_registers_sva #(
+    .CLIC  (CLIC),
+    .DEBUG (DEBUG)
+  ) cs_registers_sva (
+    .clk             (core_i.cs_registers_i.clk),
+    .rst_n           (core_i.cs_registers_i.rst_n),
+    .ctrl_fsm_i      (core_i.cs_registers_i.ctrl_fsm_i),
+    .ctrl_fsm_cs     (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .id_ex_pipe_i    (core_i.cs_registers_i.id_ex_pipe_i),
+    .ex_wb_pipe_i    (core_i.cs_registers_i.ex_wb_pipe_i),
+    .csr_rdata_o     (core_i.cs_registers_i.csr_rdata_o),
+    .csr_we_int      (core_i.cs_registers_i.csr_we_int),
+    .mtvec_mode_o    (core_i.cs_registers_i.mtvec_mode_o),
+    .wb_valid_i      (core_i.wb_valid),
+    .mnxti_we        (core_i.cs_registers_i.mnxti_we),
+    .mintstatus_we   (core_i.cs_registers_i.mintstatus_we),
+    .mcause_we       (core_i.cs_registers_i.mcause_we),
+    .clic_pa_o       (core_i.cs_registers_i.clic_pa_o),
+    .clic_pa_valid_o (core_i.cs_registers_i.clic_pa_valid_o),
+    .mintstatus_q    (core_i.cs_registers_i.mintstatus_q),
+    .priv_lvl_n      (core_i.cs_registers_i.priv_lvl_n),
+    .priv_lvl_q      (core_i.cs_registers_i.priv_lvl_q),
+    .mscratch_q      (core_i.cs_registers_i.mscratch_q),
+    .mcause_q        (core_i.cs_registers_i.mcause_q),
+    .mstatus_q       (core_i.cs_registers_i.mstatus_q),
+    .csr_waddr       (core_i.cs_registers_i.csr_waddr),
+    .mscratch_we     (core_i.cs_registers_i.mscratch_we),
+    .instr_valid     (core_i.cs_registers_i.instr_valid),
+    .csr_op          (core_i.cs_registers_i.csr_op),
+    .etrigger_wb_o   (core_i.cs_registers_i.etrigger_wb_o),
+    .mepc_we         (core_i.cs_registers_i.mepc_we),
+    .mepc_n          (core_i.cs_registers_i.mepc_n),
+    .mtvec_addr_o    (core_i.cs_registers_i.mtvec_addr_o),
+    .dpc_n           (core_i.cs_registers_i.dpc_n),
+    .dpc_we          (core_i.cs_registers_i.dpc_we),
+    .mstatus_n       (core_i.cs_registers_i.mstatus_n),
+    .mcause_n        (core_i.cs_registers_i.mcause_n),
+    .mstatus_we      (core_i.cs_registers_i.mstatus_we),
+    .csr_wdata       (core_i.cs_registers_i.csr_wdata),
+    .jvt_q           (core_i.cs_registers_i.jvt_q),
+    .dscratch0_q     (core_i.cs_registers_i.dscratch0_q),
+    .dscratch1_q     (core_i.cs_registers_i.dscratch1_q),
+    .dcsr_q          (core_i.cs_registers_i.dcsr_q),
+    .dpc_q           (core_i.cs_registers_i.dpc_q),
+    .mepc_q          (core_i.cs_registers_i.mepc_q),
+    .mtvec_q         (core_i.cs_registers_i.mtvec_q),
+    .mintthresh_q    (core_i.cs_registers_i.mintthresh_q),
+    .mie_q           (core_i.cs_registers_i.mie_q),
+    .mtvt_q          (core_i.cs_registers_i.mtvt_q)
+  );
+
+  cv32e40x_load_store_unit_sva #(
+    .DEPTH (LSU_ASSERT_DEPTH),
+    .DEBUG (DEBUG),
+    .A_EXT (A_EXT)
+  ) load_store_unit_sva (
+    .clk                  (core_i.load_store_unit_i.clk),
+    .rst_n                (core_i.load_store_unit_i.rst_n),
+    .cnt_q                (core_i.load_store_unit_i.cnt_q),
+    .busy_o               (core_i.load_store_unit_i.busy_o),
+    .count_up             (core_i.load_store_unit_i.count_up),
+    .count_down           (core_i.load_store_unit_i.count_down),
+    .ctrl_fsm_i           (core_i.load_store_unit_i.ctrl_fsm_i),
+    .ctrl_fsm_ns          (core_i.controller_i.controller_fsm_i.ctrl_fsm_ns),
+    .ctrl_fsm_cs          (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .trans_valid          (core_i.load_store_unit_i.trans_valid),
+    .lsu_split_0_o        (core_i.load_store_unit_i.lsu_split_0_o),
+    .write_buffer_state_i (core_i.load_store_unit_i.write_buffer_i.state),
+    .split_q              (core_i.load_store_unit_i.split_q),
+    .lsu_mpu_status_1_o   (core_i.load_store_unit_i.lsu_mpu_status_1_o),
+    .lsu_align_status_1_o (core_i.load_store_unit_i.lsu_align_status_1_o),
+    .ex_wb_pipe_i         (core_i.ex_wb_pipe),
+    .m_c_obi_data_if      (core_i.m_c_obi_data_if),
+    .xif_req              (core_i.load_store_unit_i.xif_req),
+    .xif_res_q            (core_i.load_store_unit_i.xif_res_q),
+    .id_valid             (core_i.id_valid),
+    .ex_ready             (core_i.ex_ready),
+    .lsu_en_id            (core_i.id_stage_i.lsu_en),
+    .lsu_first_op_0_o     (core_i.load_store_unit_i.lsu_first_op_0_o),
+    .valid_0_i            (core_i.load_store_unit_i.valid_0_i),
+    .ready_0_i            (core_i.load_store_unit_i.ready_0_i),
+    .trigger_match_0_i    (core_i.load_store_unit_i.trigger_match_0_i),
+    .lsu_wpt_match_1_o    (core_i.load_store_unit_i.lsu_wpt_match_1_o),
+    .trans                (core_i.load_store_unit_i.trans),
+    .bus_trans_valid      (core_i.load_store_unit_i.bus_trans_valid),
+    .mpu_err_i            (core_i.load_store_unit_i.mpu_i.mpu_err),
+    .align_err_i          (core_i.load_store_unit_i.align_check_i.align_err)
+  );
+
+  generate
+    if (DBG_NUM_TRIGGERS > 0) begin : debug_sva
+      cv32e40x_wpt_sva wpt_sva (
+        .clk       (core_i.load_store_unit_i.gen_wpt.wpt_i.clk),
+        .rst_n     (core_i.load_store_unit_i.gen_wpt.wpt_i.rst_n),
+        .state_q   (core_i.load_store_unit_i.gen_wpt.wpt_i.state_q),
+        .mpu_state (core_i.load_store_unit_i.mpu_i.state_q)
+      );
+
+      cv32e40x_debug_triggers_sva #(
+        .DBG_NUM_TRIGGERS (DBG_NUM_TRIGGERS),
+        .A_EXT            (A_EXT)
+      ) debug_triggers_sva (
+        .clk                  (core_i.cs_registers_i.debug_triggers_i.clk),
+        .rst_n                (core_i.cs_registers_i.debug_triggers_i.rst_n),
+        .csr_op               (core_i.cs_registers_i.csr_op),
+        .csr_wdata            (core_i.cs_registers_i.csr_wdata),
+        .csr_waddr            (core_i.cs_registers_i.csr_waddr),
+        .ex_wb_pipe_i         (core_i.ex_wb_pipe),
+        .ctrl_fsm_i           (core_i.cs_registers_i.debug_triggers_i.ctrl_fsm_i),
+        .tselect_q            (core_i.cs_registers_i.debug_triggers_i.gen_triggers.tselect_q),
+        .tdata1_q             (core_i.cs_registers_i.debug_triggers_i.gen_triggers.tdata1_q),
+        .tdata2_q             (core_i.cs_registers_i.debug_triggers_i.gen_triggers.tdata2_q),
+        .lsu_addr_match_en    (
+          core_i.cs_registers_i.debug_triggers_i.gen_triggers.lsu_addr_match_en
+        ),
+        .priv_lvl_ex_i        (core_i.cs_registers_i.debug_triggers_i.priv_lvl_ex_i),
+        .lsu_atomic_ex_i      (core_i.cs_registers_i.debug_triggers_i.lsu_atomic_ex_i),
+        .lsu_valid_ex_i       (core_i.cs_registers_i.debug_triggers_i.lsu_valid_ex_i),
+        .trigger_match_if_wb  (core_i.ex_wb_pipe.trigger_match),
+        .trigger_match_ex_wb  (core_i.wpt_match_wb),
+        .wb_valid_i           (core_i.wb_valid),
+        .tdata1_we_i          (core_i.cs_registers_i.debug_triggers_i.tdata1_we_i)
+      );
+    end
+  endgenerate
+
+  cv32e40x_prefetch_unit_sva #(
+    .CLIC (CLIC)
+  ) prefetch_unit_sva (
+    .clk              (core_i.if_stage_i.prefetch_unit_i.clk),
+    .rst_n            (core_i.if_stage_i.prefetch_unit_i.rst_n),
+    .ctrl_fsm_i       (core_i.if_stage_i.prefetch_unit_i.ctrl_fsm_i),
+    .fetch_valid      (core_i.if_stage_i.prefetch_unit_i.fetch_valid),
+    .branch_addr_i    (core_i.if_stage_i.prefetch_unit_i.branch_addr_i),
+    .prefetch_ready_i (core_i.if_stage_i.prefetch_unit_i.prefetch_ready_i),
+    .trans_valid_o    (core_i.if_stage_i.prefetch_unit_i.trans_valid_o),
+    .trans_ready_i    (core_i.if_stage_i.prefetch_unit_i.trans_ready_i),
+    .fetch_ptr_resp   (core_i.if_stage_i.prefetch_unit_i.fetch_ptr_resp),
+    .ctrl_fsm_cs      (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .debug_req_i      (core_i.debug_req_i)
+  );
+
+  cv32e40x_alignment_buffer_sva alignment_buffer_sva (
+    .clk                     (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.clk),
+    .rst_n                   (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.rst_n),
+    .valid_q                 (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.valid_q),
+    .ctrl_fsm_i              (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.ctrl_fsm_i
+    ),
+    .branch_addr_i           (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.branch_addr_i
+    ),
+    .fetch_branch_o          (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.fetch_branch_o
+    ),
+    .fetch_branch_addr_o     (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.fetch_branch_addr_o
+    ),
+    .fetch_valid_o           (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.fetch_valid_o
+    ),
+    .fetch_ready_i           (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.fetch_ready_i
+    ),
+    .instr_cnt_n             (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_cnt_n
+    ),
+    .instr_cnt_q             (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_cnt_q
+    ),
+    .instr_valid_o           (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_valid_o
+    ),
+    .instr_ready_i           (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_ready_i
+    ),
+    .instr_addr_o            (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_addr_o
+    ),
+    .instr_is_clic_ptr_o     (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_is_clic_ptr_o
+    ),
+    .instr_is_mret_ptr_o     (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_is_mret_ptr_o
+    ),
+    .instr_is_tbljmp_ptr_o   (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.instr_is_tbljmp_ptr_o
+    ),
+    .resp_valid_i            (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.resp_valid_i
+    ),
+    .resp_valid_gated        (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.resp_valid_gated
+    ),
+    .outstanding_cnt_q       (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.outstanding_cnt_q
+    ),
+    .n_flush_q               (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.n_flush_q
+    ),
+    .resp_i                  (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.resp_i),
+    .wptr                    (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.wptr),
+    .rptr                    (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.rptr),
+    .rptr2                   (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.rptr2),
+    .pop_q                   (core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.pop_q),
+    .ptr_fetch_accepted_q    (
+      core_i.if_stage_i.prefetch_unit_i.alignment_buffer_i.ptr_fetch_accepted_q
     )
   );
 
+  cv32e40x_prefetcher_sva #(
+    .CLIC (CLIC)
+  ) prefetcher_sva (
+    .clk                  (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.clk),
+    .rst_n                (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.rst_n),
+    .fetch_branch_i       (
+      core_i.if_stage_i.prefetch_unit_i.prefetcher_i.fetch_branch_i
+    ),
+    .fetch_branch_addr_i  (
+      core_i.if_stage_i.prefetch_unit_i.prefetcher_i.fetch_branch_addr_i
+    ),
+    .trans_valid_o        (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.trans_valid_o),
+    .trans_ready_i        (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.trans_ready_i),
+    .trans_addr_o         (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.trans_addr_o),
+    .trans_ptr_access_q   (
+      core_i.if_stage_i.prefetch_unit_i.prefetcher_i.trans_ptr_access_q
+    ),
+    .fetch_ready_o        (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.fetch_ready_o),
+    .fetch_valid_i        (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.fetch_valid_i),
+    .state_q              (core_i.if_stage_i.prefetch_unit_i.prefetcher_i.state_q),
+    .prefetch_is_clic_ptr (core_i.if_stage_i.prefetch_unit_i.prefetch_is_clic_ptr_o)
+  );
+
+  generate
+    if (M_EXT != M_NONE) begin : mul_sva
+      cv32e40x_mult_sva mult_sva (
+        .clk           (core_i.ex_stage_i.mul.mult_i.clk),
+        .rst_n         (core_i.ex_stage_i.mul.mult_i.rst_n),
+        .op_a_i        (core_i.ex_stage_i.mul.mult_i.op_a_i),
+        .op_b_i        (core_i.ex_stage_i.mul.mult_i.op_b_i),
+        .ready_o       (core_i.ex_stage_i.mul.mult_i.ready_o),
+        .valid_i       (core_i.ex_stage_i.mul.mult_i.valid_i),
+        .result_o      (core_i.ex_stage_i.mul.mult_i.result_o),
+        .valid_o       (core_i.ex_stage_i.mul.mult_i.valid_o),
+        .ready_i       (core_i.ex_stage_i.mul.mult_i.ready_i),
+        .signed_mode_i (core_i.ex_stage_i.mul.mult_i.signed_mode_i),
+        .operator_i    (core_i.ex_stage_i.mul.mult_i.operator_i),
+        .mulh_acc      (core_i.ex_stage_i.mul.mult_i.mulh_acc),
+        .mulh_state    (core_i.ex_stage_i.mul.mult_i.mulh_state),
+        .mulh_al       (core_i.ex_stage_i.mul.mult_i.mulh_al),
+        .mulh_bl       (core_i.ex_stage_i.mul.mult_i.mulh_bl),
+        .mulh_ah       (core_i.ex_stage_i.mul.mult_i.mulh_ah),
+        .mulh_bh       (core_i.ex_stage_i.mul.mult_i.mulh_bh),
+        .int_result    (core_i.ex_stage_i.mul.mult_i.int_result),
+        .halt_i        (core_i.ex_stage_i.mul.mult_i.halt_i),
+        .kill_i        (core_i.ex_stage_i.mul.mult_i.kill_i)
+      );
+    end
+  endgenerate
+
+  generate
+    if (M_EXT == M) begin : div_sva
+      cv32e40x_div_sva div_sva (
+        .clk     (core_i.ex_stage_i.div.div_i.clk),
+        .rst_n   (core_i.ex_stage_i.div.div_i.rst_n),
+        .valid_i (core_i.ex_stage_i.div.div_i.valid_i),
+        .ready_o (core_i.ex_stage_i.div.div_i.ready_o),
+        .ready_i (core_i.ex_stage_i.div.div_i.ready_i),
+        .valid_o (core_i.ex_stage_i.div.div_i.valid_o)
+      );
+    end
+  endgenerate
+
+  cv32e40x_core_sva #(
+    .A_EXT            (A_EXT),
+    .DEBUG            (DEBUG),
+    .PMA_NUM_REGIONS  (PMA_NUM_REGIONS),
+    .CLIC             (CLIC),
+    .DBG_NUM_TRIGGERS (DBG_NUM_TRIGGERS)
+  ) core_sva (
+    .clk                        (core_i.clk),
+    .clk_i                      (core_i.clk_i),
+    .rst_ni                     (core_i.rst_ni),
+    .ctrl_fsm                   (core_i.ctrl_fsm),
+    .exc_cause                  (core_i.controller_i.controller_fsm_i.exc_cause),
+    .mie                        (core_i.mie),
+    .mie_n                      (core_i.cs_registers_i.mie_n),
+    .mie_we                     (core_i.cs_registers_i.mie_we),
+    .mip                        (core_i.mip),
+    .dcsr                       (core_i.dcsr),
+    .if_valid                   (core_i.if_valid),
+    .id_ready                   (core_i.id_ready),
+    .first_op_if                (core_i.if_stage_i.first_op),
+    .prefetch_is_mret_ptr_i     (core_i.if_stage_i.prefetch_is_mret_ptr),
+    .if_id_pipe                 (core_i.if_id_pipe),
+    .id_ex_pipe                 (core_i.id_ex_pipe),
+    .id_stage_id_valid          (core_i.id_stage_i.id_valid_o),
+    .ex_ready                   (core_i.ex_ready),
+    .irq_ack                    (core_i.irq_ack),
+    .irq_clic_shv               (core_i.irq_clic_shv),
+    .irq_req_ctrl               (core_i.irq_req_ctrl),
+    .irq_wu_ctrl                (core_i.irq_wu_ctrl),
+    .ex_wb_pipe                 (core_i.ex_wb_pipe),
+    .wb_valid                   (core_i.wb_valid),
+    .branch_taken_in_ex         (core_i.controller_i.controller_fsm_i.branch_taken_ex),
+    .last_op_wb                 (core_i.last_op_wb),
+    .fetch_enable_i             (core_i.fetch_enable_i),
+    .debug_req_i                (core_i.debug_req_i),
+    .alu_op_a_mux_sel_id_i      (core_i.id_stage_i.alu_op_a_mux_sel),
+    .alu_op_b_mux_sel_id_i      (core_i.id_stage_i.alu_op_b_mux_sel),
+    .operand_a_id_i             (core_i.id_stage_i.operand_a),
+    .operand_b_id_i             (core_i.id_stage_i.operand_b),
+    .jalr_fw_id_i               (core_i.id_stage_i.jalr_fw),
+    .last_op_id                 (core_i.last_op_id),
+    .first_op_id                (core_i.first_op_id),
+    .rf_wdata_wb                (core_i.rf_wdata_wb),
+    .rf_we_wb                   (core_i.rf_we_wb),
+    .lsu_atomic_wb              (core_i.lsu_atomic_wb),
+    .lsu_valid_wb               (core_i.lsu_valid_wb),
+    .lsu_exception_wb           (core_i.wb_stage_i.lsu_exception),
+    .lsu_wpt_match_wb           (core_i.wb_stage_i.lsu_wpt_match),
+    .lsu_rdata_wb               (core_i.lsu_rdata_wb),
+    .lsu_exokay_wb              (core_i.load_store_unit_i.resp.bus_resp.exokay),
+    .alu_jmpr_id_i              (core_i.alu_jmpr_id),
+    .alu_en_id_i                (core_i.id_stage_i.alu_en),
+    .instr_addr_o               (core_i.instr_addr_o),
+    .instr_memtype_o            (core_i.instr_memtype_o),
+    .instr_req_o                (core_i.instr_req_o),
+    .instr_dbg_o                (core_i.instr_dbg_o),
+    .data_memtype_o             (core_i.data_memtype_o),
+    .data_req_o                 (core_i.data_req_o),
+    .data_gnt_i                 (core_i.data_gnt_i),
+    .data_rvalid_i              (core_i.data_rvalid_i),
+    .data_we_o                  (core_i.data_we_o),
+    .data_atop_o                (core_i.data_atop_o),
+    .data_dbg_o                 (core_i.data_dbg_o),
+    .ctrl_debug_mode_n          (core_i.controller_i.controller_fsm_i.debug_mode_n),
+    .ctrl_pending_async_debug   (
+      core_i.controller_i.controller_fsm_i.pending_async_debug
+    ),
+    .ctrl_async_debug_allowed   (
+      core_i.controller_i.controller_fsm_i.async_debug_allowed
+    ),
+    .ctrl_pending_sync_debug    (
+      core_i.controller_i.controller_fsm_i.pending_sync_debug
+    ),
+    .ctrl_sync_debug_allowed    (
+      core_i.controller_i.controller_fsm_i.sync_debug_allowed
+    ),
+    .ctrl_interrupt_allowed     (
+      core_i.controller_i.controller_fsm_i.interrupt_allowed
+    ),
+    .ctrl_pending_interrupt     (
+      core_i.controller_i.controller_fsm_i.pending_interrupt
+    ),
+    .ctrl_byp                   (core_i.ctrl_byp),
+    .ctrl_debug_cause_n         (core_i.controller_i.controller_fsm_i.debug_cause_n),
+    .ctrl_pending_nmi           (core_i.controller_i.controller_fsm_i.pending_nmi),
+    .ctrl_fsm_cs                (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .debug_halted_o             (core_i.debug_halted_o),
+    .cs_registers_mie_q         (core_i.cs_registers_i.mie_q),
+    .cs_registers_mepc_n        (core_i.cs_registers_i.mepc_n),
+    .cs_registers_csr_cause_i   (core_i.cs_registers_i.ctrl_fsm_i.csr_cause),
+    .cs_registers_mcause_q      (core_i.cs_registers_i.mcause_q),
+    .cs_registers_mstatus_q     (core_i.cs_registers_i.mstatus_q),
+    .xif_compressed_valid       (core_i.xif_compressed_if.compressed_valid),
+    .xif_issue_valid            (core_i.xif_issue_if.issue_valid),
+    .xif_commit_valid           (core_i.xif_commit_if.commit_valid),
+    .xif_mem_ready              (core_i.xif_mem_if.mem_ready),
+    .xif_mem_result_valid       (core_i.xif_mem_result_if.mem_result_valid),
+    .xif_result_ready           (core_i.xif_result_if.result_ready),
+    .core_sleep_o               (core_i.core_sleep_o),
+    .fencei_flush_req_o         (core_i.fencei_flush_req_o),
+    .debug_havereset_o          (core_i.debug_havereset_o),
+    .debug_running_o            (core_i.debug_running_o),
+    .lsu_cnt_q                  (core_i.load_store_unit_i.cnt_q),
+    .resp_filter_bus_cnt_q      (core_i.load_store_unit_i.response_filter_i.bus_cnt_q),
+    .resp_filter_core_cnt_q     (
+      core_i.load_store_unit_i.response_filter_i.core_cnt_q
+    ),
+    .write_buffer_state         (core_i.load_store_unit_i.write_buffer_i.state),
+    .priv_lvl                   (core_i.priv_lvl)
+  );
+
+  generate
+    if (CLIC) begin : clic_asserts
+      cv32e40x_clic_int_controller_sva clic_int_controller_sva (
+        .clk                       (core_i.gen_clic_interrupt.clic_int_controller_i.clk),
+        .rst_n                     (core_i.gen_clic_interrupt.clic_int_controller_i.rst_n),
+        .irq_req_ctrl_o            (
+          core_i.gen_clic_interrupt.clic_int_controller_i.irq_req_ctrl_o
+        ),
+        .clic_irq_q                (
+          core_i.gen_clic_interrupt.clic_int_controller_i.clic_irq_q
+        ),
+        .clic_irq_level_q          (
+          core_i.gen_clic_interrupt.clic_int_controller_i.clic_irq_level_q
+        ),
+        .global_irq_enable         (
+          core_i.gen_clic_interrupt.clic_int_controller_i.global_irq_enable
+        ),
+        .irq_wu_ctrl_o             (
+          core_i.gen_clic_interrupt.clic_int_controller_i.irq_wu_ctrl_o
+        ),
+        .ctrl_pending_interrupt    (
+          core_i.controller_i.controller_fsm_i.pending_interrupt
+        ),
+        .ctrl_interrupt_allowed    (
+          core_i.controller_i.controller_fsm_i.interrupt_allowed
+        ),
+        .ctrl_pending_nmi          (core_i.controller_i.controller_fsm_i.pending_nmi),
+        .ctrl_pending_async_debug  (
+          core_i.controller_i.controller_fsm_i.pending_async_debug
+        ),
+        .ctrl_fsm_cs               (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+        .ctrl_fsm                  (core_i.ctrl_fsm),
+        .dcsr                      (core_i.dcsr)
+      );
+    end
+  endgenerate
+
+  cv32e40x_sleep_unit_sva sleep_unit_sva (
+    .clk_ungated_i (core_i.sleep_unit_i.clk_ungated_i),
+    .rst_n         (core_i.sleep_unit_i.rst_n),
+    .clock_en      (core_i.sleep_unit_i.clock_en),
+    .core_busy_d   (core_i.sleep_unit_i.core_busy_d),
+    .core_busy_q   (core_i.sleep_unit_i.core_busy_q),
+    .core_sleep_o  (core_i.sleep_unit_i.core_sleep_o),
+    .fetch_enable_d(core_i.sleep_unit_i.fetch_enable_d),
+    .fetch_enable_q(core_i.sleep_unit_i.fetch_enable_q),
+    .ctrl_fsm_cs   (core_i.controller_i.controller_fsm_i.ctrl_fsm_cs),
+    .ctrl_fsm_ns   (core_i.controller_i.controller_fsm_i.ctrl_fsm_ns)
+  );
+
+  cv32e40x_decoder_sva #(
+    .A_EXT (A_EXT)
+  ) decoder_sva (
+    .clk              (core_i.id_stage_i.clk),
+    .rst_n            (core_i.id_stage_i.rst_n),
+    .decoder_m_ctrl   (core_i.id_stage_i.decoder_i.decoder_m_ctrl),
+    .decoder_a_ctrl   (core_i.id_stage_i.decoder_i.decoder_a_ctrl),
+    .decoder_i_ctrl   (core_i.id_stage_i.decoder_i.decoder_i_ctrl),
+    .decoder_b_ctrl   (core_i.id_stage_i.decoder_i.decoder_b_ctrl),
+    .decoder_ctrl_mux (core_i.id_stage_i.decoder_i.decoder_ctrl_mux),
+    .instr_rdata      (core_i.id_stage_i.decoder_i.instr_rdata),
+    .if_id_pipe       (core_i.if_id_pipe),
+    .alu_en_o         (core_i.id_stage_i.decoder_i.alu_en_o),
+    .div_en_o         (core_i.id_stage_i.decoder_i.div_en_o),
+    .mul_en_o         (core_i.id_stage_i.decoder_i.mul_en_o),
+    .csr_en_o         (core_i.id_stage_i.decoder_i.csr_en_o),
+    .sys_en_o         (core_i.id_stage_i.decoder_i.sys_en_o),
+    .lsu_en_o         (core_i.id_stage_i.decoder_i.lsu_en_o),
+    .illegal_insn_o   (core_i.id_stage_i.decoder_i.illegal_insn_o)
+  );
+
+  cv32e40x_mpu_sva #(
+    .PMA_NUM_REGIONS (PMA_NUM_REGIONS),
+    .PMA_CFG         (PMA_CFG),
+    .IS_INSTR_SIDE   (1),
+    .CORE_RESP_TYPE  (cv32e40x_pkg::inst_resp_t),
+    .CORE_REQ_TYPE   (cv32e40x_pkg::obi_inst_req_t),
+    .DEBUG           (DEBUG),
+    .DM_REGION_START (DM_REGION_START),
+    .DM_REGION_END   (DM_REGION_END)
+  ) mpu_if_sva (
+    .clk                        (core_i.if_stage_i.mpu_i.clk),
+    .rst_n                      (core_i.if_stage_i.mpu_i.rst_n),
+    .instr_fetch_access         (core_i.if_stage_i.mpu_i.instr_fetch_access),
+    .atomic_access_i            (core_i.if_stage_i.mpu_i.atomic_access_i),
+    .misaligned_access_i        (core_i.if_stage_i.mpu_i.misaligned_access_i),
+    .bus_trans_bufferable       (core_i.if_stage_i.mpu_i.bus_trans_bufferable),
+    .bus_trans_cacheable        (core_i.if_stage_i.mpu_i.bus_trans_cacheable),
+    .pma_err                    (core_i.if_stage_i.mpu_i.pma_err),
+    .pma_addr                   (core_i.if_stage_i.mpu_i.pma_i.trans_addr_i),
+    .pma_cfg                    (core_i.if_stage_i.mpu_i.pma_i.pma_cfg),
+    .pma_dbg                    (core_i.if_stage_i.mpu_i.core_trans_i.dbg),
+    .obi_memtype                (core_i.instr_memtype_o),
+    .obi_addr                   (core_i.instr_addr_o),
+    .obi_req                    (core_i.instr_req_o),
+    .obi_gnt                    (core_i.instr_gnt_i),
+    .obi_dbg                    (core_i.instr_dbg_o),
+    .obi_if_state               (core_i.if_stage_i.instruction_obi_i.state_q),
+    .bus_trans_ready_i          (core_i.if_stage_i.mpu_i.bus_trans_ready_i),
+    .bus_trans_valid_o          (core_i.if_stage_i.mpu_i.bus_trans_valid_o),
+    .bus_resp_valid_i           (core_i.if_stage_i.mpu_i.bus_resp_valid_i),
+    .write_buffer_state         (cv32e40x_pkg::WBUF_EMPTY),
+    .write_buffer_valid_o       ('0),
+    .write_buffer_txn_bufferable('0),
+    .write_buffer_txn_cacheable ('0),
+    .core_trans_valid_i         (core_i.if_stage_i.mpu_i.core_trans_valid_i),
+    .core_trans_ready_o         (core_i.if_stage_i.mpu_i.core_trans_ready_o),
+    .core_trans_i               (core_i.if_stage_i.mpu_i.core_trans_i),
+    .core_trans_pushpop_i       (core_i.if_stage_i.mpu_i.core_trans_pushpop_i),
+    .core_resp_valid_o          (core_i.if_stage_i.mpu_i.core_resp_valid_o),
+    .mpu_status                 (core_i.if_stage_i.mpu_i.mpu_status),
+    .mpu_err_trans_valid        (core_i.if_stage_i.mpu_i.mpu_err_trans_valid),
+    .mpu_block_core             (core_i.if_stage_i.mpu_i.mpu_block_core),
+    .mpu_block_bus              (core_i.if_stage_i.mpu_i.mpu_block_bus),
+    .state_q                    (core_i.if_stage_i.mpu_i.state_q),
+    .mpu_err                    (core_i.if_stage_i.mpu_i.mpu_err),
+    .load_access                (core_i.if_stage_i.mpu_i.load_access),
+    .lsu_split_0                (1'b0),
+    .lsu_split_q                (1'b0),
+    .lsu_ctrl_update            (1'b0),
+    .ctrl_exception_wb          (1'b0)
+  );
+
+  cv32e40x_mpu_sva #(
+    .PMA_NUM_REGIONS (PMA_NUM_REGIONS),
+    .PMA_CFG         (PMA_CFG),
+    .IS_INSTR_SIDE   (0),
+    .CORE_RESP_TYPE  (cv32e40x_pkg::data_resp_t),
+    .CORE_REQ_TYPE   (cv32e40x_pkg::obi_data_req_t),
+    .A_EXT           (A_EXT),
+    .DEBUG           (DEBUG),
+    .DM_REGION_START (DM_REGION_START),
+    .DM_REGION_END   (DM_REGION_END)
+  ) mpu_lsu_sva (
+    .clk                        (core_i.load_store_unit_i.mpu_i.clk),
+    .rst_n                      (core_i.load_store_unit_i.mpu_i.rst_n),
+    .instr_fetch_access         (core_i.load_store_unit_i.mpu_i.instr_fetch_access),
+    .atomic_access_i            (core_i.load_store_unit_i.mpu_i.atomic_access_i),
+    .misaligned_access_i        (core_i.load_store_unit_i.mpu_i.misaligned_access_i),
+    .bus_trans_bufferable       (core_i.load_store_unit_i.mpu_i.bus_trans_bufferable),
+    .bus_trans_cacheable        (core_i.load_store_unit_i.mpu_i.bus_trans_cacheable),
+    .pma_err                    (core_i.load_store_unit_i.mpu_i.pma_err),
+    .pma_addr                   (core_i.load_store_unit_i.mpu_i.pma_i.trans_addr_i),
+    .pma_cfg                    (core_i.load_store_unit_i.mpu_i.pma_i.pma_cfg),
+    .pma_dbg                    (core_i.load_store_unit_i.mpu_i.core_trans_i.dbg),
+    .obi_memtype                (core_i.data_memtype_o),
+    .obi_addr                   (core_i.data_addr_o),
+    .obi_req                    (core_i.data_req_o),
+    .obi_gnt                    (core_i.data_gnt_i),
+    .obi_dbg                    (core_i.data_dbg_o),
+    .obi_if_state               (cv32e40x_pkg::TRANSPARENT),
+    .bus_trans_ready_i          (core_i.load_store_unit_i.mpu_i.bus_trans_ready_i),
+    .bus_trans_valid_o          (core_i.load_store_unit_i.mpu_i.bus_trans_valid_o),
+    .bus_resp_valid_i           (core_i.load_store_unit_i.mpu_i.bus_resp_valid_i),
+    .write_buffer_state         (core_i.load_store_unit_i.write_buffer_i.state),
+    .write_buffer_valid_o       (core_i.load_store_unit_i.write_buffer_i.valid_o),
+    .write_buffer_txn_bufferable(
+      core_i.load_store_unit_i.write_buffer_i.trans_o.memtype[0]
+    ),
+    .write_buffer_txn_cacheable (
+      core_i.load_store_unit_i.write_buffer_i.trans_o.memtype[1]
+    ),
+    .core_trans_valid_i         (core_i.load_store_unit_i.mpu_i.core_trans_valid_i),
+    .core_trans_ready_o         (core_i.load_store_unit_i.mpu_i.core_trans_ready_o),
+    .core_trans_i               (core_i.load_store_unit_i.mpu_i.core_trans_i),
+    .core_trans_pushpop_i       (core_i.load_store_unit_i.mpu_i.core_trans_pushpop_i),
+    .core_resp_valid_o          (core_i.load_store_unit_i.mpu_i.core_resp_valid_o),
+    .mpu_status                 (core_i.load_store_unit_i.mpu_i.mpu_status),
+    .mpu_err_trans_valid        (core_i.load_store_unit_i.mpu_i.mpu_err_trans_valid),
+    .mpu_block_core             (core_i.load_store_unit_i.mpu_i.mpu_block_core),
+    .mpu_block_bus              (core_i.load_store_unit_i.mpu_i.mpu_block_bus),
+    .state_q                    (core_i.load_store_unit_i.mpu_i.state_q),
+    .mpu_err                    (core_i.load_store_unit_i.mpu_i.mpu_err),
+    .load_access                (core_i.load_store_unit_i.mpu_i.load_access),
+    .lsu_split_0                (core_i.load_store_unit_i.lsu_split_0_o),
+    .lsu_split_q                (core_i.load_store_unit_i.split_q),
+    .lsu_ctrl_update            (core_i.load_store_unit_i.ctrl_update),
+    .ctrl_exception_wb          (core_i.controller_i.controller_fsm_i.exception_in_wb)
+  );
+
+  cv32e40x_lsu_response_filter_sva #(
+    .DEPTH (LSU_ASSERT_DEPTH)
+  ) lsu_response_filter_sva (
+    .clk                 (core_i.load_store_unit_i.response_filter_i.clk),
+    .rst_n               (core_i.load_store_unit_i.response_filter_i.rst_n),
+    .valid_i             (core_i.load_store_unit_i.response_filter_i.valid_i),
+    .busy_o              (core_i.load_store_unit_i.response_filter_i.busy_o),
+    .core_trans_accepted (core_i.load_store_unit_i.response_filter_i.core_trans_accepted),
+    .bus_trans_accepted  (core_i.load_store_unit_i.response_filter_i.bus_trans_accepted),
+    .core_cnt_q          (core_i.load_store_unit_i.response_filter_i.core_cnt_q),
+    .bus_cnt_q           (core_i.load_store_unit_i.response_filter_i.bus_cnt_q)
+  );
+
+  cv32e40x_write_buffer_sva #(
+    .PMA_NUM_REGIONS (PMA_NUM_REGIONS),
+    .PMA_CFG         (PMA_CFG)
+  ) write_buffer_sva (
+    .clk        (core_i.load_store_unit_i.write_buffer_i.clk),
+    .rst_n      (core_i.load_store_unit_i.write_buffer_i.rst_n),
+    .ready_i    (core_i.load_store_unit_i.write_buffer_i.ready_i),
+    .valid_i    (core_i.load_store_unit_i.write_buffer_i.valid_i),
+    .trans_i    (core_i.load_store_unit_i.write_buffer_i.trans_i),
+    .state      (core_i.load_store_unit_i.write_buffer_i.state),
+    .trans_q    (core_i.load_store_unit_i.write_buffer_i.trans_q),
+    .bufferable (core_i.load_store_unit_i.write_buffer_i.bufferable),
+    .valid_o    (core_i.load_store_unit_i.write_buffer_i.valid_o),
+    .ready_o    (core_i.load_store_unit_i.write_buffer_i.ready_o),
+    .trans_o    (core_i.load_store_unit_i.write_buffer_i.trans_o)
+  );
+
+  cv32e40x_sequencer_sva #(
+    .RV32 (RV32)
+  ) sequencer_sva (
+    .clk                    (core_i.if_stage_i.gen_seq.sequencer_i.clk),
+    .rst_n                  (core_i.if_stage_i.gen_seq.sequencer_i.rst_n),
+    .valid_i                (core_i.if_stage_i.gen_seq.sequencer_i.valid_i),
+    .kill_i                 (core_i.if_stage_i.gen_seq.sequencer_i.kill_i),
+    .halt_i                 (core_i.if_stage_i.gen_seq.sequencer_i.halt_i),
+    .valid_o                (core_i.if_stage_i.gen_seq.sequencer_i.valid_o),
+    .ready_i                (core_i.if_stage_i.gen_seq.sequencer_i.ready_i),
+    .ready_o                (core_i.if_stage_i.gen_seq.sequencer_i.ready_o),
+    .instr_cnt_q            (core_i.if_stage_i.gen_seq.sequencer_i.instr_cnt_q),
+    .seq_state_q            (core_i.if_stage_i.gen_seq.sequencer_i.seq_state_q),
+    .seq_last_o             (core_i.if_stage_i.gen_seq.sequencer_i.seq_last_o),
+    .seq_instr              (core_i.if_stage_i.gen_seq.sequencer_i.seq_instr),
+    .instr_is_tbljmp_ptr_i  (
+      core_i.if_stage_i.gen_seq.sequencer_i.instr_is_tbljmp_ptr_i
+    ),
+    .instr_is_clic_ptr_i    (core_i.if_stage_i.gen_seq.sequencer_i.instr_is_clic_ptr_i),
+    .instr_is_mret_ptr_i    (core_i.if_stage_i.gen_seq.sequencer_i.instr_is_mret_ptr_i),
+    .seq_tbljmp_o           (core_i.if_stage_i.gen_seq.sequencer_i.seq_tbljmp_o),
+    .ex_wb_pipe_i           (core_i.ex_wb_pipe),
+    .wb_valid_i             (core_i.wb_stage_i.wb_valid_o),
+    .exception_in_wb_i      (core_i.controller_i.controller_fsm_i.exception_in_wb),
+    .pending_sync_debug_i   (
+      core_i.controller_i.controller_fsm_i.pending_sync_debug
+    )
+  );
+
+`ifndef FORMAL
+  cv32e40x_rvfi_sim_trace tracer_i (
+    .rvfi_valid     (rvfi_i.rvfi_valid),
+    .rvfi_pc_rdata  (rvfi_i.rvfi_pc_rdata),
+    .rvfi_rs1_addr  (rvfi_i.rvfi_rs1_addr),
+    .rvfi_rs1_rdata (rvfi_i.rvfi_rs1_rdata),
+    .rvfi_rs2_addr  (rvfi_i.rvfi_rs2_addr),
+    .rvfi_rs2_rdata (rvfi_i.rvfi_rs2_rdata),
+    .rvfi_rd_addr   (rvfi_i.rvfi_rd_addr),
+    .rvfi_rd_wdata  (rvfi_i.rvfi_rd_wdata),
+    .rvfi_mem_addr  (rvfi_i.rvfi_mem_addr),
+    .rvfi_mem_rmask (rvfi_i.rvfi_mem_rmask),
+    .rvfi_mem_wmask (rvfi_i.rvfi_mem_wmask),
+    .rvfi_mem_rdata (rvfi_i.rvfi_mem_rdata),
+    .rvfi_mem_wdata (rvfi_i.rvfi_mem_wdata)
+  );
 `endif
+
+  cv32e40x_rvfi_sva #(
+    .CLIC  (CLIC),
+    .DEBUG (DEBUG),
+    .A_EXT (A_EXT)
+  ) rvfi_sva (
+    .clk_i                   (rvfi_i.clk_i),
+    .rst_ni                  (rvfi_i.rst_ni),
+    .rvfi_valid              (rvfi_i.rvfi_valid),
+    .rvfi_intr               (rvfi_i.rvfi_intr),
+    .rvfi_trap               (rvfi_i.rvfi_trap),
+    .rvfi_dbg                (rvfi_i.rvfi_dbg),
+    .ctrl_fsm_i              (rvfi_i.ctrl_fsm_i),
+    .rvfi_csr_dcsr_rdata     (rvfi_i.rvfi_csr_dcsr_rdata),
+    .rvfi_csr_mcause_rdata   (rvfi_i.rvfi_csr_mcause_rdata),
+    .rvfi_pc_rdata           (rvfi_i.rvfi_pc_rdata),
+    .mtvec_addr_i            (core_i.mtvec_addr),
+    .rvfi_csr_mie_rdata      (rvfi_i.rvfi_csr_mie_rdata),
+    .rvfi_csr_mip_rdata      (rvfi_i.rvfi_csr_mip_rdata),
+    .irq_ack                 (core_i.irq_ack),
+    .dbg_ack                 (core_i.dbg_ack),
+    .ebreak_in_wb_i          (core_i.controller_i.controller_fsm_i.ebreak_in_wb),
+    .in_trap                 (rvfi_i.in_trap),
+    .debug_cause             (rvfi_i.debug_cause),
+    .if_valid_i              (rvfi_i.if_valid_i),
+    .id_ready_i              (rvfi_i.id_ready_i),
+    .pc_if_i                 (rvfi_i.pc_if_i),
+    .pc_id_i                 (rvfi_i.pc_id_i),
+    .pc_ex_i                 (core_i.id_ex_pipe.pc),
+    .pc_wb_i                 (rvfi_i.pc_wb_i),
+    .prefetch_instr_if_i     (rvfi_i.prefetch_instr_if_i),
+    .prefetch_compressed_if_i(rvfi_i.prefetch_compressed_if_i),
+    .prefetch_addr_if_i      (rvfi_i.prefetch_addr_if_i),
+    .prefetch_valid_if_i     (rvfi_i.prefetch_valid_if_i),
+    .prefetch_ready_if_i     (rvfi_i.prefetch_ready_if_i),
+    .obi_instr_if            (rvfi_i.obi_instr_if),
+    .obi_instr_fifo_q        (rvfi_i.rvfi_instr_obi_i.fifo_q),
+    .obi_instr_rptr_q_inc    (rvfi_i.rvfi_instr_obi_i.rptr_q_inc),
+    .obi_instr_rptr_q        (rvfi_i.rvfi_instr_obi_i.rptr_q),
+    .mret_ptr_wb             (rvfi_i.mret_ptr_wb),
+    .instr_rdata_wb_past     (rvfi_i.instr_rdata_wb_past),
+    .lsu_atomic_wb_i         (core_i.lsu_atomic_wb),
+    .lsu_en_wb_i             (core_i.ex_wb_pipe.lsu_en),
+    .lsu_split_q_wb_i        (core_i.load_store_unit_i.split_q),
+    .pc_mux_exception        (rvfi_i.pc_mux_exception),
+    .pc_mux_debug            (rvfi_i.pc_mux_debug),
+    .in_trap_clr             (rvfi_i.in_trap_clr),
+    .wb_valid_lastop         (rvfi_i.wb_valid_lastop),
+    .etrigger_in_wb_i        (rvfi_i.etrigger_in_wb_i),
+    .m_c_obi_data_if         (core_i.m_c_obi_data_if),
+    .rvfi_mem_addr           (rvfi_i.rvfi_mem_addr),
+    .rvfi_mem_rmask          (rvfi_i.rvfi_mem_rmask),
+    .rvfi_mem_wmask          (rvfi_i.rvfi_mem_wmask),
+    .rvfi_mem_rdata          (rvfi_i.rvfi_mem_rdata),
+    .rvfi_mem_wdata          (rvfi_i.rvfi_mem_wdata),
+    .rvfi_mem_exokay         (rvfi_i.rvfi_mem_exokay),
+    .rvfi_mem_err            (rvfi_i.rvfi_mem_err),
+    .rvfi_mem_prot           (rvfi_i.rvfi_mem_prot),
+    .rvfi_mem_atop           (rvfi_i.rvfi_mem_atop),
+    .rvfi_mem_memtype        (rvfi_i.rvfi_mem_memtype),
+    .rvfi_mem_dbg            (rvfi_i.rvfi_mem_dbg)
+  );
+
+`endif // COREV_ASSERT_OFF
+
+endmodule
